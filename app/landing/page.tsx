@@ -1,377 +1,655 @@
 import Link from "next/link";
 
-const problems = [
-  {
-    title: "No-shows",
-    text: "Bookings look full, but revenue disappears when customers never turn up.",
-  },
-  {
-    title: "Unpaid orders",
-    text: "Staff prepare food or hold tables before payment is properly verified.",
-  },
-  {
-    title: "Last-minute cancellations",
-    text: "Time inventory dies quietly and owners only feel the loss after service hours.",
-  },
+const telemetry = [
+  ["Protected", "RM 1,240"],
+  ["At risk", "RM 620"],
+  ["Recovered", "78%"],
 ];
 
-const pillars = [
+const modes = [
   {
-    eyebrow: "Slot Protection",
-    title: "Know which bookings are safe, exposed, or dangerous.",
-    text: "Valsentra turns every booking or order into a live revenue object with risk, payment protection, and recovery status.",
+    label: "Guard",
+    copy: "Deposits, payment verification, and staff release rules lock around exposed bookings before service begins.",
   },
   {
-    eyebrow: "Payment Control",
-    title: "Do not release risky orders by mistake.",
-    text: "Block unsafe flows, verify payment properly, and reduce operational mistakes before they become losses.",
+    label: "Read",
+    copy: "Each table, appointment, or order is scored as safe, exposed, or critical with quiet operational clarity.",
   },
   {
-    eyebrow: "Recovery Engine",
-    title: "Recover revenue when bookings die.",
-    text: "When a slot cancels or an order fails, Valsentra helps owners push recovery instead of just recording the loss.",
-  },
-];
-
-const features = [
-  "Revenue protected / at risk dashboard",
-  "Deposit and payment rules",
-  "Fraud and mismatch alerts",
-  "Customer reliability scoring",
-  "No-show and cancellation tracking",
-  "Waitlist recovery workflow",
-  "Staff-friendly action flow",
-  "Owner rules engine",
-];
-
-const industries = [
-  {
-    title: "Restaurants",
-    text: "Protect tables, preorders, large group bookings, and risky unpaid orders.",
-  },
-  {
-    title: "Lash Techs & Beauty",
-    text: "Protect appointment slots, premium sessions, deposits, and repeat no-show clients.",
-  },
-  {
-    title: "Microbusinesses",
-    text: "Any business where time slots or orders can quietly leak money.",
+    label: "Recover",
+    copy: "Cancelled slots and failed orders move into a waitlist recovery flow instead of disappearing after hours.",
   },
 ];
 
 export default function LandingPage() {
   return (
-    <main className="min-h-screen bg-neutral-950 text-white">
-      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.08),transparent_28%),radial-gradient(circle_at_80%_20%,rgba(239,68,68,0.14),transparent_22%),linear-gradient(to_bottom,rgba(255,255,255,0.02),transparent_40%)]" />
+    <main className="luxury-shell">
+      <style>{styles}</style>
 
-      <section className="mx-auto max-w-7xl px-4 py-6 md:px-6 md:py-8">
-        <nav className="flex items-center justify-between rounded-full border border-white/10 bg-white/5 px-4 py-3 backdrop-blur md:px-5">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-sm font-bold text-neutral-950">
-              V
-            </div>
-            <div>
-              <p className="text-sm font-semibold tracking-wide">Valsentra</p>
-              <p className="text-xs text-white/55">Revenue Protection System</p>
-            </div>
+      <nav className="topbar" aria-label="Primary navigation">
+        <Link href="/" className="brand-mark" aria-label="Valsentra home">
+          Valsentra
+        </Link>
+        <div className="nav-links">
+          <a href="#calibre">Calibre</a>
+          <a href="#control">Control</a>
+          <Link href="/restaurant">Staff View</Link>
+        </div>
+      </nav>
+
+      <section className="hero" aria-labelledby="hero-title">
+        <div className="hero-copy">
+          <p className="eyebrow">Revenue Protection System / Calibre R-01</p>
+          <h1 id="hero-title">
+            Every reservation has a pulse. Valsentra keeps it alive.
+          </h1>
+          <p className="lede">
+            A precise control interface for businesses where missed time,
+            unpaid orders, and cancellations quietly become lost revenue.
+          </p>
+          <div className="hero-actions" aria-label="Product entry points">
+            <Link href="/restaurant/owner">Owner Console</Link>
+            <Link href="/restaurant">Staff Workflow</Link>
+          </div>
+        </div>
+
+        <div className="instrument-stage" id="calibre" aria-label="Valsentra calibre interface">
+          <div className="orbital-readout">
+            <span>Live Risk</span>
+            <strong>03</strong>
           </div>
 
-          <div className="hidden items-center gap-6 text-sm text-white/70 md:flex">
-            <a href="#how-it-works" className="hover:text-white">
-              How it works
-            </a>
-            <a href="#features" className="hover:text-white">
-              Features
-            </a>
-            <a href="#industries" className="hover:text-white">
-              Industries
-            </a>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Link
-              href="/restaurant"
-              className="rounded-full border border-white/15 px-4 py-2 text-sm font-medium text-white/90 hover:bg-white/10"
-            >
-              View Product
-            </Link>
-          </div>
-        </nav>
-      </section>
-
-      <section className="mx-auto max-w-7xl px-4 pb-12 pt-8 md:px-6 md:pb-20 md:pt-10">
-        <div className="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr]">
-          <div>
-            <div className="inline-flex items-center rounded-full border border-red-400/25 bg-red-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-red-300">
-              Restaurants • Beauty • Microbusinesses
-            </div>
-
-            <h1 className="mt-6 max-w-4xl text-4xl font-bold leading-tight tracking-tight sm:text-5xl md:text-6xl">
-              Stop losing revenue from{" "}
-              <span className="text-red-400">no-shows</span>,{" "}
-              <span className="text-red-400">unpaid orders</span>, and{" "}
-              <span className="text-red-400">last-minute cancellations</span>.
-            </h1>
-
-            <p className="mt-6 max-w-2xl text-base leading-7 text-white/70 md:text-lg">
-              Valsentra helps service businesses see which bookings are safe,
-              which are exposed, and which need protection before they turn into
-              lost revenue.
-            </p>
-
-            <div className="mt-8 flex flex-wrap gap-3">
-              <Link
-                href="/restaurant/owner"
-                className="rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-neutral-950 transition hover:opacity-90"
-              >
-                Open Owner Dashboard
-              </Link>
-              <Link
-                href="/restaurant"
-                className="rounded-2xl border border-white/15 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10"
-              >
-                Open Staff View
-              </Link>
-            </div>
-
-            <div className="mt-10 grid max-w-2xl gap-3 sm:grid-cols-3">
-              <StatCard value="RM at risk" label="Visible before loss happens" />
-              <StatCard value="Blocked" label="Unsafe orders stopped early" />
-              <StatCard value="Recovery" label="Cancelled revenue pushed back" />
-            </div>
-          </div>
-
-          <div className="relative">
-            <div className="rounded-[32px] border border-white/10 bg-white/5 p-4 shadow-2xl backdrop-blur">
-              <div className="rounded-[28px] border border-white/10 bg-neutral-900 p-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-white/50">Today</p>
-                    <h2 className="mt-1 text-2xl font-semibold">
-                      Revenue Control
-                    </h2>
-                  </div>
-                  <div className="rounded-full border border-red-400/20 bg-red-500/10 px-3 py-1 text-xs font-semibold text-red-300">
-                    LIVE RISK
-                  </div>
+          <div className="watch" aria-hidden="true">
+            <div className="bezel">
+              <span className="tick t1" />
+              <span className="tick t2" />
+              <span className="tick t3" />
+              <span className="tick t4" />
+              <div className="dial">
+                <div className="inner-ring" />
+                <div className="subdial subdial-left">
+                  <span />
                 </div>
-
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                  <GlassMetric title="Revenue Protected" value="RM 1,240" />
-                  <GlassMetric title="Revenue At Risk" value="RM 620" />
-                  <GlassMetric title="Blocked Orders" value="2" />
-                  <GlassMetric title="Recovery Score" value="78/100" />
+                <div className="subdial subdial-right">
+                  <span />
                 </div>
-
-                <div className="mt-5 rounded-3xl border border-red-300/15 bg-red-500/10 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold">High-Risk Order</p>
-                      <p className="mt-1 text-sm text-white/65">
-                        Table reservation • 12 pax • unpaid • deposit required
-                      </p>
-                    </div>
-                    <div className="rounded-full bg-red-500 px-3 py-1 text-xs font-semibold text-white">
-                      BLOCKED
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-4 rounded-3xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-sm font-semibold">Autopilot Queue</p>
-                  <div className="mt-3 space-y-3">
-                    <MiniAlert
-                      title="Deposit pending"
-                      text="Large dine-in booking still unpaid."
-                    />
-                    <MiniAlert
-                      title="Recovery opportunity"
-                      text="Cancelled slot can be offered to waitlist."
-                    />
-                    <MiniAlert
-                      title="Staff protection"
-                      text="Terminal mismatch detected. Do not release."
-                    />
-                  </div>
-                </div>
+                <div className="hand hand-long" />
+                <div className="hand hand-short" />
+                <div className="pinion" />
+                <p className="dial-title">R-01</p>
+                <p className="dial-caption">Protected Revenue</p>
               </div>
             </div>
+          </div>
 
-            <div className="absolute -right-3 -top-3 hidden rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white/80 backdrop-blur md:block">
-              Premium SaaS feel
-            </div>
+          <div className="side-readout">
+            <span>Deposit Lock</span>
+            <strong>Armed</strong>
           </div>
         </div>
       </section>
 
-      <section className="mx-auto max-w-7xl px-4 py-6 md:px-6 md:py-10">
-        <div className="grid gap-4 md:grid-cols-3">
-          {problems.map((item) => (
-            <div
-              key={item.title}
-              className="rounded-[28px] border border-white/10 bg-white/5 p-6"
-            >
-              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-red-300">
-                Problem
-              </p>
-              <h3 className="mt-3 text-2xl font-semibold">{item.title}</h3>
-              <p className="mt-3 text-sm leading-7 text-white/65">{item.text}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section
-        id="how-it-works"
-        className="mx-auto max-w-7xl px-4 py-14 md:px-6 md:py-20"
-      >
-        <div className="mb-10 max-w-3xl">
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-red-300">
-            How Valsentra works
-          </p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight md:text-4xl">
-            A silent assistant running behind the business.
-          </h2>
-          <p className="mt-4 text-base leading-7 text-white/65">
-            Staff should not think about risk every minute. The system should
-            decide when payment is needed, when something is exposed, and when
-            recovery should start.
-          </p>
-        </div>
-
-        <div className="grid gap-4 lg:grid-cols-3">
-          {pillars.map((item) => (
-            <div
-              key={item.title}
-              className="rounded-[28px] border border-white/10 bg-white/5 p-6"
-            >
-              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-red-300">
-                {item.eyebrow}
-              </p>
-              <h3 className="mt-3 text-2xl font-semibold leading-tight">
-                {item.title}
-              </h3>
-              <p className="mt-4 text-sm leading-7 text-white/65">{item.text}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section
-        id="features"
-        className="mx-auto max-w-7xl px-4 py-14 md:px-6 md:py-20"
-      >
-        <div className="grid gap-8 lg:grid-cols-[0.95fr_1.05fr]">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-red-300">
-              Product capabilities
-            </p>
-            <h2 className="mt-3 text-3xl font-bold tracking-tight md:text-4xl">
-              Built for real operational loss, not just scheduling.
-            </h2>
-            <p className="mt-4 max-w-xl text-base leading-7 text-white/65">
-              Valsentra combines booking protection, payment control, fraud
-              prevention, reliability tracking, and recovery workflows in one
-              system.
-            </p>
+      <section className="precision-strip" aria-label="Live telemetry">
+        {telemetry.map(([label, value]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
           </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            {features.map((feature) => (
-              <div
-                key={feature}
-                className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4 text-sm font-medium text-white/90"
-              >
-                {feature}
-              </div>
-            ))}
-          </div>
-        </div>
+        ))}
       </section>
 
-      <section
-        id="industries"
-        className="mx-auto max-w-7xl px-4 py-14 md:px-6 md:py-20"
-      >
-        <div className="mb-10 max-w-3xl">
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-red-300">
-            Who it is for
-          </p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight md:text-4xl">
-            Designed first for businesses where time and orders can quietly die.
-          </h2>
+      <section className="editorial" id="control">
+        <div>
+          <p className="eyebrow">No noise. No guesswork.</p>
+          <h2>Operational risk, reduced to a single decision surface.</h2>
         </div>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          {industries.map((item) => (
-            <div
-              key={item.title}
-              className="rounded-[28px] border border-white/10 bg-white/5 p-6"
-            >
-              <h3 className="text-2xl font-semibold">{item.title}</h3>
-              <p className="mt-3 text-sm leading-7 text-white/65">{item.text}</p>
-            </div>
-          ))}
-        </div>
+        <p>
+          Valsentra gives owners and staff a measured signal before a booking is
+          released, blocked, protected, or recovered. The interface stays dark,
+          sparse, and deliberate because the work is urgent enough already.
+        </p>
       </section>
 
-      <section className="mx-auto max-w-7xl px-4 pb-16 pt-6 md:px-6 md:pb-24">
-        <div className="rounded-[36px] border border-white/10 bg-white/5 p-8 text-center md:p-12">
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-red-300">
-            Final pitch
-          </p>
-          <h2 className="mx-auto mt-3 max-w-4xl text-3xl font-bold tracking-tight md:text-5xl">
-            Valsentra helps businesses prevent no-shows, unpaid orders, and
-            hidden revenue loss before it happens.
-          </h2>
-          <p className="mx-auto mt-5 max-w-2xl text-base leading-7 text-white/65">
-            One system for risk visibility, payment protection, staff safety,
-            and owner control.
-          </p>
+      <section className="mode-rail" aria-label="Valsentra modes">
+        {modes.map((mode, index) => (
+          <article key={mode.label} className="mode">
+            <span>{String(index + 1).padStart(2, "0")}</span>
+            <h3>{mode.label}</h3>
+            <p>{mode.copy}</p>
+          </article>
+        ))}
+      </section>
 
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-            <Link
-              href="/restaurant/owner"
-              className="rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-neutral-950 transition hover:opacity-90"
-            >
-              See Owner Dashboard
-            </Link>
-            <Link
-              href="/restaurant"
-              className="rounded-2xl border border-white/15 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10"
-            >
-              See Staff Workflow
-            </Link>
-          </div>
-        </div>
+      <section className="closing">
+        <p className="eyebrow">For restaurants, beauty studios, and time-based operators</p>
+        <h2>Designed like an instrument. Used like a safeguard.</h2>
+        <Link href="/restaurant/owner">Enter the console</Link>
       </section>
     </main>
   );
 }
 
-function StatCard({ value, label }: { value: string; label: string }) {
-  return (
-    <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
-      <p className="text-lg font-semibold">{value}</p>
-      <p className="mt-1 text-sm text-white/60">{label}</p>
-    </div>
-  );
+const styles = `
+:root {
+  color-scheme: dark;
+  --black: #030303;
+  --ink: #f4efe7;
+  --muted: rgba(244, 239, 231, 0.58);
+  --line: rgba(244, 239, 231, 0.14);
+  --gold: #c6a15b;
+  --danger: #8f332f;
 }
 
-function GlassMetric({ title, value }: { title: string; value: string }) {
-  return (
-    <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
-      <p className="text-sm text-white/55">{title}</p>
-      <p className="mt-2 text-2xl font-bold">{value}</p>
-    </div>
-  );
+* {
+  box-sizing: border-box;
 }
 
-function MiniAlert({ title, text }: { title: string; text: string }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-neutral-950/40 p-3">
-      <p className="text-sm font-semibold">{title}</p>
-      <p className="mt-1 text-xs leading-6 text-white/60">{text}</p>
-    </div>
-  );
+body {
+  margin: 0;
+  background: var(--black);
 }
+
+.luxury-shell {
+  min-height: 100vh;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 18rem),
+    radial-gradient(circle at 50% 24rem, rgba(198, 161, 91, 0.09), transparent 34rem),
+    #030303;
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.topbar {
+  position: fixed;
+  z-index: 20;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem clamp(1.25rem, 4vw, 4.5rem);
+  color: rgba(244, 239, 231, 0.72);
+  mix-blend-mode: difference;
+}
+
+.brand-mark,
+.nav-links a,
+.hero-actions a,
+.closing a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.brand-mark {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.nav-links {
+  display: flex;
+  gap: clamp(1rem, 3vw, 2.25rem);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(24rem, 1.05fr);
+  min-height: 100vh;
+  align-items: center;
+  gap: clamp(2rem, 5vw, 5rem);
+  padding: 7rem clamp(1.25rem, 5vw, 5rem) 4rem;
+}
+
+.hero:after {
+  position: absolute;
+  right: 0;
+  bottom: 2rem;
+  left: 0;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, transparent, var(--line), transparent);
+}
+
+.hero-copy {
+  max-width: 52rem;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--gold);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+h1 {
+  max-width: 13ch;
+  margin-top: 1.4rem;
+  font-size: clamp(4.4rem, 10vw, 10.8rem);
+  line-height: 0.85;
+}
+
+.lede {
+  max-width: 38rem;
+  margin: 2rem 0 0;
+  color: var(--muted);
+  font-size: clamp(1rem, 1.6vw, 1.3rem);
+  line-height: 1.8;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 1rem;
+  margin-top: 2.5rem;
+}
+
+.hero-actions a,
+.closing a {
+  display: inline-flex;
+  min-height: 2.8rem;
+  align-items: center;
+  border-bottom: 1px solid rgba(198, 161, 91, 0.7);
+  color: var(--ink);
+  font-size: 0.75rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.instrument-stage {
+  position: relative;
+  display: grid;
+  min-height: min(58vw, 43rem);
+  place-items: center;
+}
+
+.watch {
+  position: relative;
+  width: min(72vw, 38rem);
+  aspect-ratio: 1;
+  animation: float 9s ease-in-out infinite;
+}
+
+.bezel,
+.dial,
+.inner-ring,
+.subdial {
+  position: absolute;
+  border-radius: 50%;
+}
+
+.bezel {
+  inset: 4%;
+  border: 1px solid rgba(244, 239, 231, 0.2);
+  background:
+    radial-gradient(circle at 34% 24%, rgba(255, 255, 255, 0.22), transparent 0.55rem),
+    conic-gradient(from 220deg, #080808, #27231d, #080808, #15120e, #080808);
+  box-shadow:
+    inset 0 0 5rem rgba(255, 255, 255, 0.05),
+    0 4rem 8rem rgba(0, 0, 0, 0.88);
+}
+
+.bezel:before {
+  position: absolute;
+  inset: 5%;
+  content: "";
+  border: 1px solid rgba(198, 161, 91, 0.24);
+  border-radius: inherit;
+}
+
+.dial {
+  inset: 12%;
+  overflow: hidden;
+  border: 1px solid rgba(244, 239, 231, 0.16);
+  background:
+    linear-gradient(120deg, rgba(255, 255, 255, 0.08), transparent 42%),
+    repeating-conic-gradient(from 0deg, rgba(244, 239, 231, 0.055) 0deg 1deg, transparent 1deg 8deg),
+    radial-gradient(circle, #161411, #050505 68%);
+}
+
+.inner-ring {
+  inset: 18%;
+  border: 1px solid rgba(244, 239, 231, 0.1);
+  animation: rotateSlow 30s linear infinite;
+}
+
+.subdial {
+  top: 55%;
+  width: 25%;
+  aspect-ratio: 1;
+  border: 1px solid rgba(198, 161, 91, 0.32);
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.subdial-left {
+  left: 18%;
+}
+
+.subdial-right {
+  right: 18%;
+}
+
+.subdial span,
+.hand {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1px;
+  transform-origin: 50% 100%;
+  background: var(--gold);
+}
+
+.subdial span {
+  height: 34%;
+  animation: sweep 8s linear infinite;
+}
+
+.hand-long {
+  height: 37%;
+  animation: sweep 16s linear infinite;
+}
+
+.hand-short {
+  height: 27%;
+  background: rgba(244, 239, 231, 0.74);
+  animation: sweep 48s linear infinite;
+}
+
+.pinion {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0.7rem;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--gold);
+  transform: translate(-50%, -50%);
+}
+
+.dial-title,
+.dial-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  margin: 0;
+  text-align: center;
+}
+
+.dial-title {
+  top: 28%;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.7rem, 4vw, 3.2rem);
+  letter-spacing: 0.08em;
+}
+
+.dial-caption {
+  top: 41%;
+  color: rgba(244, 239, 231, 0.46);
+  font-size: 0.62rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.tick {
+  position: absolute;
+  left: 50%;
+  top: 2.2%;
+  width: 1px;
+  height: 9%;
+  background: rgba(198, 161, 91, 0.58);
+  transform-origin: 50% 535%;
+}
+
+.t2 {
+  transform: rotate(90deg);
+}
+
+.t3 {
+  transform: rotate(180deg);
+}
+
+.t4 {
+  transform: rotate(270deg);
+}
+
+.orbital-readout,
+.side-readout {
+  position: absolute;
+  z-index: 2;
+  width: 10rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.85rem;
+  backdrop-filter: blur(8px);
+}
+
+.orbital-readout {
+  left: 5%;
+  top: 17%;
+}
+
+.side-readout {
+  right: 2%;
+  bottom: 20%;
+}
+
+.orbital-readout span,
+.side-readout span,
+.precision-strip span,
+.mode span {
+  display: block;
+  color: rgba(244, 239, 231, 0.48);
+  font-size: 0.66rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.orbital-readout strong,
+.side-readout strong {
+  display: block;
+  margin-top: 0.45rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 2.2rem;
+  font-weight: 400;
+}
+
+.precision-strip {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  margin: 0 clamp(1.25rem, 5vw, 5rem);
+}
+
+.precision-strip div {
+  min-height: 8rem;
+  padding: 1.5rem 0;
+}
+
+.precision-strip div + div {
+  border-left: 1px solid var(--line);
+  padding-left: clamp(1rem, 3vw, 3rem);
+}
+
+.precision-strip strong {
+  display: block;
+  margin-top: 1rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(2.2rem, 5vw, 4.8rem);
+  font-weight: 400;
+}
+
+.editorial {
+  display: grid;
+  grid-template-columns: 1fr 0.65fr;
+  gap: clamp(2rem, 7vw, 7rem);
+  padding: clamp(6rem, 13vw, 12rem) clamp(1.25rem, 5vw, 5rem);
+}
+
+.editorial h2,
+.closing h2 {
+  max-width: 13ch;
+  margin-top: 1.1rem;
+  font-size: clamp(3rem, 7vw, 8rem);
+  line-height: 0.92;
+}
+
+.editorial > p {
+  align-self: end;
+  max-width: 34rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: clamp(1rem, 1.6vw, 1.2rem);
+  line-height: 1.9;
+}
+
+.mode-rail {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  margin: 0 clamp(1.25rem, 5vw, 5rem);
+  background: var(--line);
+}
+
+.mode {
+  min-height: 21rem;
+  padding: clamp(1.4rem, 4vw, 3rem);
+  background: #050505;
+}
+
+.mode h3 {
+  margin: 4rem 0 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(2.5rem, 5vw, 5.5rem);
+  font-weight: 400;
+}
+
+.mode p {
+  max-width: 24rem;
+  margin: 1.3rem 0 0;
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.closing {
+  min-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: clamp(5rem, 11vw, 10rem) clamp(1.25rem, 5vw, 5rem);
+}
+
+.closing h2 {
+  max-width: 11ch;
+}
+
+.closing a {
+  width: max-content;
+  margin-top: 2.5rem;
+}
+
+@keyframes sweep {
+  from {
+    transform: translate(-50%, -100%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -100%) rotate(360deg);
+  }
+}
+
+@keyframes rotateSlow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-2deg);
+  }
+  50% {
+    transform: translateY(-1.2rem) rotate(1.5deg);
+  }
+}
+
+@media (max-width: 900px) {
+  .topbar {
+    position: absolute;
+    mix-blend-mode: normal;
+  }
+
+  .nav-links {
+    display: none;
+  }
+
+  .hero,
+  .editorial,
+  .mode-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .hero {
+    min-height: auto;
+    padding-top: 6rem;
+  }
+
+  h1 {
+    font-size: clamp(4rem, 18vw, 6.8rem);
+  }
+
+  .instrument-stage {
+    min-height: 31rem;
+  }
+
+  .watch {
+    width: min(88vw, 31rem);
+  }
+
+  .precision-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .precision-strip div + div {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
+  }
+
+  .orbital-readout,
+  .side-readout {
+    width: 8rem;
+  }
+
+  .mode {
+    min-height: 17rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *:before,
+  *:after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+`;

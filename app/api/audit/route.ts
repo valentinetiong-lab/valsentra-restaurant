@@ -7,6 +7,7 @@ function mapAuditFromDb(row: Record<string, any>) {
     action: row.action,
     staff: row.staff,
     orderId: row.order_id,
+    meta: row.meta ?? {},
     createdAt: row.created_at,
   };
 }
@@ -17,7 +18,7 @@ export async function GET() {
       .from("audit_logs")
       .select("*")
       .order("created_at", { ascending: false })
-      .limit(100);
+      .limit(200);
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
@@ -40,6 +41,7 @@ export async function POST(request: NextRequest) {
       action: body.action,
       staff: body.staff,
       order_id: body.orderId,
+      meta: body.meta ?? {},
     };
 
     const { data, error } = await supabaseAdmin

@@ -20,6 +20,19 @@ export type RestaurantOrder = {
   paymentVerified?: boolean;
   suspiciousPaymentScreenshot?: boolean;
   blocked?: boolean;
+
+  collapseProbability?: number;
+  collapseRiskTier?: string;
+  recommendedIntervention?: string;
+  instabilityFactors?: string[];
+  collapseExplanation?: string;
+
+  ghostPingShouldSend?: boolean;
+  ghostPingUrgency?: string;
+  ghostPingMessageType?: string;
+  ghostPingEscalationStage?: string;
+  ghostPingRecommendedDelayMinutes?: number;
+  ghostPingReasoning?: string;
 };
 
 export type AutopilotActionType =
@@ -60,7 +73,25 @@ export type AutopilotRule = {
   actions: AutopilotActionType[];
 };
 
-export type AutopilotQueueStatus = "QUEUED" | "DONE" | "SKIPPED";
+export type AutopilotQueueStatus =
+  | "QUEUED"
+  | "APPROVED"
+  | "DONE"
+  | "REJECTED"
+  | "SKIPPED";
+
+export type AutopilotIntelligenceSeverity =
+  | "INFO"
+  | "WATCH"
+  | "WARNING"
+  | "CRITICAL";
+
+export type AutopilotLearningSignal = {
+  eventType: string;
+  outcome: "POSITIVE" | "NEUTRAL" | "NEGATIVE" | "UNKNOWN";
+  signalWeight: number;
+  learningSummary: string;
+};
 
 export type AutopilotQueueItem = {
   id: string;
@@ -72,6 +103,20 @@ export type AutopilotQueueItem = {
   reason: string;
   createdAt: string;
   estimatedRevenueProtected?: number;
+  approvedAt?: string;
+  rejectedAt?: string;
+  completedAt?: string;
+  skippedAt?: string;
+  reviewedBy?: string;
+
+  intelligenceSeverity?: AutopilotIntelligenceSeverity;
+  collapseProbability?: number;
+  collapseRiskTier?: string;
+  recommendedIntervention?: string;
+  ghostPingUrgency?: string;
+  ghostPingReasoning?: string;
+  aiConfidence?: number;
+  learningSignal?: AutopilotLearningSignal;
 };
 
 export type AutopilotEvaluationResult = {
@@ -79,4 +124,12 @@ export type AutopilotEvaluationResult = {
   reason?: string;
   actions: AutopilotActionType[];
   estimatedRevenueProtected?: number;
+  intelligenceSeverity?: AutopilotIntelligenceSeverity;
+  collapseProbability?: number;
+  collapseRiskTier?: string;
+  recommendedIntervention?: string;
+  ghostPingUrgency?: string;
+  ghostPingReasoning?: string;
+  aiConfidence?: number;
+  learningSignal?: AutopilotLearningSignal;
 };

@@ -3,53 +3,11 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-
-type OrderStatus =
-  | "UNPAID"
-  | "PAYMENT_SENT"
-  | "PAID"
-  | "CANCELLED"
-  | "NO_SHOW";
-
-type OrderType =
-  | "DINE_IN_RESERVATION"
-  | "PREORDER_PICKUP"
-  | "DELIVERY_PREORDER";
-
-type PaymentState =
-  | "PENDING"
-  | "LINK_SENT"
-  | "SCREENSHOT_SUBMITTED"
-  | "VERIFIED"
-  | "SUSPICIOUS"
-  | "BLOCKED";
-
-type PaymentStage = "DEPOSIT" | "FINAL";
-
-type RestaurantOrder = {
-  id: string;
-  customerName: string;
-  phone: string;
-  orderType: OrderType;
-  amount: number;
-  guests: number;
-  reservationTime: string;
-  itemSummary: string;
-  status: OrderStatus;
-  paymentState?: PaymentState;
-  paymentStage?: PaymentStage;
-  paymentVerified?: boolean;
-  depositRequired: boolean;
-  depositAmount?: number;
-  depositPaid: boolean;
-  reliabilityScore: number;
-  terminalMismatch: boolean;
-  notes: string;
-  assignedStaff: string;
-  riskLevel?: "LOW" | "MED" | "HIGH";
-  protectionReason?: string;
-  createdAt?: string;
-};
+import type {
+  OrderType,
+  PaymentState,
+  RestaurantOrder,
+} from "@/app/lib/domain/restaurant";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-MY", {
@@ -74,11 +32,9 @@ function getOrderTypeLabel(orderType: OrderType) {
 
 function paymentBadgeClasses(state?: PaymentState) {
   if (state === "VERIFIED") return "bg-green-100 text-green-700 border-green-200";
-  if (state === "LINK_SENT") return "bg-blue-100 text-blue-700 border-blue-200";
-  if (state === "SCREENSHOT_SUBMITTED")
-    return "bg-yellow-100 text-yellow-700 border-yellow-200";
-  if (state === "SUSPICIOUS" || state === "BLOCKED")
-    return "bg-red-100 text-red-700 border-red-200";
+  if (state === "PENDING") return "bg-yellow-100 text-yellow-700 border-yellow-200";
+  if (state === "FAILED") return "bg-orange-100 text-orange-700 border-orange-200";
+  if (state === "BLOCKED") return "bg-red-100 text-red-700 border-red-200";
   return "bg-neutral-100 text-neutral-700 border-neutral-200";
 }
 
@@ -187,7 +143,7 @@ export default function PayOrderPage() {
     if (!order) return;
 
     const updated = await patchOrder({
-      paymentState: "SCREENSHOT_SUBMITTED",
+      paymentState: "PENDING",
       notes: `Customer submitted screenshot for ${getPaymentStageLabel(order).toLowerCase()}. Awaiting verification.`,
       status: order.status === "UNPAID" ? "PAYMENT_SENT" : order.status,
     });

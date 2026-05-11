@@ -1,151 +1,372 @@
-import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "../../lib/admin";
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/app/lib/admin";
+import { runWaitlistCascade } from "@/app/lib/waitlistCascadeService";
+import { evaluateAutoRelease } from "@/app/lib/autoReleaseEngine";
+import { buildReliabilityProfileFromOrders } from "@/app/lib/reliabilityEngine";
+import { createContinuousLearningEntry } from "@/app/lib/continuousLearningLedger";
+import {
+  mapAndEnrichOrderFromDb,
+  mapOrderToDb,
+} from "@/app/lib/domain/orderMapper";
+import { parseReservationTime } from "@/app/lib/domain/reservationTimeParser";
+import { normalisePaymentState } from "@/app/lib/engines/paymentEngine";
+import {
+  shouldExecuteAutoRelease,
+  shouldExecuteWaitlist,
+  shouldSilent,
+  type AutopilotMode,
+} from "@/app/lib/autopilotMode";
 
-function mapOrderFromDb(row: Record<string, any>) {
+function createLearningEntryForOrder(
+  order: any,
+  eventType: Parameters<typeof createContinuousLearningEntry>[0]["eventType"],
+  outcome: Parameters<typeof createContinuousLearningEntry>[0]["outcome"],
+  notes?: string
+) {
+  return createContinuousLearningEntry({
+    orderId: order.id,
+    customerName: order.customerName,
+    phone: order.phone,
+    eventType,
+    outcome,
+    collapseProbability: order.collapseProbability,
+    collapseRiskTier: order.collapseRiskTier,
+    recommendedIntervention: order.recommendedIntervention,
+    ghostPingUrgency: order.ghostPingUrgency,
+    ghostPingMessageType: order.ghostPingMessageType,
+    reliabilityScore: order.reliabilityScore,
+    amount: order.amount,
+    orderType: order.orderType,
+    notes,
+  });
+}
+
+function buildIntelligenceMeta(order: any) {
   return {
-    id: row.id,
-    customerName: row.customer_name,
-    phone: row.phone,
-    orderType: row.order_type,
-    amount: Number(row.amount),
-    guests: Number(row.guests),
-    reservationTime: row.reservation_time,
-    itemSummary: row.item_summary,
-    status: row.status,
-    depositRequired: row.deposit_required,
-    depositPaid: row.deposit_paid,
-    reliabilityScore: Number(row.reliability_score),
-    terminalMismatch: row.terminal_mismatch,
-    notes: row.notes,
-    assignedStaff: row.assigned_staff,
-    riskLevel: row.risk_level ?? "LOW",
-    protectionReason: row.protection_reason ?? "",
-    createdAt: row.created_at,
+    collapseProbability: order.collapseProbability,
+    collapseRiskTier: order.collapseRiskTier,
+    recommendedIntervention: order.recommendedIntervention,
+    instabilityFactors: order.instabilityFactors,
+    collapseExplanation: order.collapseExplanation,
+    ghostPingShouldSend: order.ghostPingShouldSend,
+    ghostPingUrgency: order.ghostPingUrgency,
+    ghostPingMessageType: order.ghostPingMessageType,
+    ghostPingEscalationStage: order.ghostPingEscalationStage,
+    ghostPingRecommendedDelayMinutes: order.ghostPingRecommendedDelayMinutes,
+    ghostPingReasoning: order.ghostPingReasoning,
   };
 }
 
-export async function GET(request: NextRequest) {
-  try {
-    const id = request.nextUrl.searchParams.get("id");
+function addMinutesToIso(baseIso: string, minutes: number) {
+  return new Date(
+    new Date(baseIso).getTime() + minutes * 60 * 1000
+  ).toISOString();
+}
 
-    if (id) {
-      const { data, error } = await supabaseAdmin
-        .from("orders")
-        .select("*")
-        .eq("id", id)
-        .single();
+async function getAutopilotMode(): Promise<AutopilotMode> {
+  const { data, error } = await supabaseAdmin
+    .from("restaurant_settings")
+    .select("autopilot_mode")
+    .eq("id", 1)
+    .single();
 
-      if (error) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    console.warn("Failed to load autopilot mode. Falling back to SEMI_AUTO.", error);
+    return "SEMI_AUTO";
+  }
+
+  const mode = data?.autopilot_mode;
+
+  if (mode === "MANUAL" || mode === "SEMI_AUTO" || mode === "FULL_AUTO") {
+    return mode;
+  }
+
+  return "SEMI_AUTO";
+}
+
+export async function GET() {
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  const orders = (data ?? []).map(mapAndEnrichOrderFromDb);
+
+  return NextResponse.json(orders);
+}
+
+export async function POST(req: Request) {
+  const body = await req.json();
+
+  const createdAt = body.createdAt ?? new Date().toISOString();
+  const parsedReservationTime = parseReservationTime(String(body.reservationTime ?? ""));
+
+  if (!parsedReservationTime.ok) {
+    return NextResponse.json({ error: parsedReservationTime.error }, { status: 400 });
+  }
+
+  const payload = mapOrderToDb({
+    ...body,
+    createdAt,
+    reservationTime: parsedReservationTime.reservationTime,
+    paymentState: normalisePaymentState(body.paymentState),
+    slotHoldStartedAt: body.slotHoldStartedAt ?? createdAt,
+    slotHoldExpiresAt: body.slotHoldExpiresAt ?? addMinutesToIso(createdAt, 15),
+    autoReleaseEligible: body.autoReleaseEligible ?? true,
+    reliabilityScore: body.reliabilityScore ?? 70,
+    assignedStaff: body.assignedStaff ?? "Staff",
+  });
+
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json(mapAndEnrichOrderFromDb(data));
+}
+
+export async function PATCH(req: Request) {
+  const body = await req.json();
+  const payload = mapOrderToDb(body);
+
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .update(payload)
+    .eq("id", body.id)
+    .select()
+    .single();
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json(mapAndEnrichOrderFromDb(data));
+}
+
+export async function PUT() {
+  const mode = await getAutopilotMode();
+
+  const { data: ordersRaw, error } = await supabaseAdmin.from("orders").select("*");
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  const allOrders = (ordersRaw ?? []).map(mapAndEnrichOrderFromDb);
+
+  const logs: string[] = [];
+
+  for (const order of allOrders) {
+    const customerOrders = allOrders.filter((candidate) => {
+      if (order.phone && candidate.phone) {
+        return candidate.phone === order.phone;
       }
 
-      return NextResponse.json(mapOrderFromDb(data));
+      return candidate.customerName === order.customerName;
+    });
+
+    const customerProfile = buildReliabilityProfileFromOrders(customerOrders);
+
+    const decision = evaluateAutoRelease({
+      ...order,
+      customerProfile,
+    });
+
+    if (!decision.shouldRelease) {
+      if (decision.requiresHumanAction) {
+        logs.push(`${order.id}: needs human review (${decision.reason})`);
+
+        const learningEntry = createLearningEntryForOrder(
+          order,
+          "GHOST_PING_RECOMMENDED",
+          "UNKNOWN",
+          `Human review required before release. ${decision.reason}`
+        );
+
+        if (!shouldSilent(mode)) {
+          await supabaseAdmin.from("audit_logs").insert({
+            action: `Human review required for ${order.id}. Rule: ${decision.rule}.`,
+            staff: "Autopilot",
+            order_id: order.id,
+            meta: {
+              mode,
+              rule: decision.rule,
+              reason: decision.reason,
+              explanation: decision.explanation,
+              confidence: decision.confidence,
+              riskLevel: decision.riskLevel,
+              orderAmount: order.amount ?? 0,
+              ...buildIntelligenceMeta(order),
+              learningEntry,
+              requiresHumanAction: true,
+              humanActionReason: decision.reason,
+            },
+          });
+        }
+      }
+
+      continue;
     }
 
-    const { data, error } = await supabaseAdmin
+    if (!shouldExecuteAutoRelease(mode)) {
+      logs.push(`${order.id}: suggested release only (${mode})`);
+
+      const learningEntry = createLearningEntryForOrder(
+        order,
+        "AUTO_RELEASED",
+        "UNKNOWN",
+        `Auto release was suggested but not executed because autopilot mode is ${mode}.`
+      );
+
+      if (!shouldSilent(mode)) {
+        await supabaseAdmin.from("audit_logs").insert({
+          action: `Auto release suggested for ${order.id}. Rule: ${decision.rule}. Confidence: ${decision.confidence}%.`,
+          staff: "Autopilot",
+          order_id: order.id,
+          meta: {
+            mode,
+            rule: decision.rule,
+            reason: decision.reason,
+            explanation: decision.explanation,
+            confidence: decision.confidence,
+            riskLevel: decision.riskLevel,
+            orderAmount: order.amount ?? 0,
+            ...buildIntelligenceMeta(order),
+            learningEntry,
+            requiresHumanAction: true,
+            humanActionReason:
+              "Autopilot is in manual mode, so this action requires approval.",
+          },
+        });
+      }
+
+      continue;
+    }
+
+    const { error: updateError } = await supabaseAdmin
       .from("orders")
-      .select("*")
-      .order("created_at", { ascending: false });
+      .update(
+        mapOrderToDb({
+          id: order.id,
+          status: "CANCELLED",
+          autoReleaseEligible: false,
+          notes: `${order.notes || ""} | ${decision.reason}`,
+        })
+      )
+      .eq("id", order.id);
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (updateError) {
+      logs.push(`${order.id}: release failed (${updateError.message})`);
+      continue;
     }
 
-    return NextResponse.json((data ?? []).map(mapOrderFromDb));
-  } catch (error: any) {
-    return NextResponse.json(
-      { error: error?.message || "Failed to fetch orders" },
-      { status: 500 }
+    logs.push(`${order.id}: released`);
+
+    const releaseLearningEntry = createLearningEntryForOrder(
+      order,
+      "AUTO_RELEASED",
+      "NEGATIVE",
+      decision.reason
     );
-  }
-}
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-
-    const payload = {
-      id: body.id,
-      customer_name: body.customerName,
-      phone: body.phone,
-      order_type: body.orderType,
-      amount: body.amount,
-      guests: body.guests,
-      reservation_time: body.reservationTime,
-      item_summary: body.itemSummary,
-      status: body.status,
-      deposit_required: body.depositRequired,
-      deposit_paid: body.depositPaid,
-      reliability_score: body.reliabilityScore,
-      terminal_mismatch: body.terminalMismatch,
-      notes: body.notes,
-      assigned_staff: body.assignedStaff,
-      risk_level: body.riskLevel ?? "LOW",
-      protection_reason: body.protectionReason ?? "",
-    };
-
-    const { data, error } = await supabaseAdmin
-      .from("orders")
-      .insert(payload)
-      .select("*")
-      .single();
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (!shouldSilent(mode)) {
+      await supabaseAdmin.from("audit_logs").insert({
+        action: `Auto release: ${order.id}. Rule: ${decision.rule}. Confidence: ${decision.confidence}%.`,
+        staff: "Autopilot",
+        order_id: order.id,
+        meta: {
+          mode,
+          rule: decision.rule,
+          reason: decision.reason,
+          explanation: decision.explanation,
+          confidence: decision.confidence,
+          riskLevel: decision.riskLevel,
+          orderAmount: order.amount ?? 0,
+          ...buildIntelligenceMeta(order),
+          learningEntry: releaseLearningEntry,
+          requiresHumanAction: decision.requiresHumanAction,
+        },
+      });
     }
 
-    return NextResponse.json(mapOrderFromDb(data));
-  } catch (error: any) {
-    return NextResponse.json(
-      { error: error?.message || "Failed to create order" },
-      { status: 500 }
-    );
-  }
-}
+    if (shouldExecuteWaitlist(mode)) {
+      const cascade = await runWaitlistCascade({
+        orderId: order.id,
+        staffName: "Autopilot",
+      });
 
-export async function PATCH(request: NextRequest) {
-  try {
-    const body = await request.json();
+      const recoveryLearningEntry = createLearningEntryForOrder(
+        order,
+        cascade.ok && cascade.lead
+          ? "WAITLIST_RECOVERY_SUCCEEDED"
+          : "WAITLIST_RECOVERY_FAILED",
+        cascade.ok && cascade.lead ? "POSITIVE" : "NEGATIVE",
+        cascade.ok && cascade.lead
+          ? `Recovered with ${cascade.lead.customerName}.`
+          : `Recovery failed. ${cascade.error ?? "No recovery lead found."}`
+      );
 
-    if (!body.id) {
-      return NextResponse.json({ error: "Missing order id" }, { status: 400 });
+      if (cascade.ok && cascade.lead) {
+        logs.push(`${order.id}: recovered with ${cascade.lead.customerName}`);
+      } else {
+        logs.push(`${order.id}: not recovered (${cascade.error})`);
+      }
+
+      if (!shouldSilent(mode)) {
+        await supabaseAdmin.from("audit_logs").insert({
+          action:
+            cascade.ok && cascade.lead
+              ? `Waitlist recovery succeeded for ${order.id} with ${cascade.lead.customerName}.`
+              : `Waitlist recovery failed for ${order.id}.`,
+          staff: "Autopilot",
+          order_id: order.id,
+          meta: {
+            mode,
+            orderAmount: order.amount ?? 0,
+            ...buildIntelligenceMeta(order),
+            cascade,
+            learningEntry: recoveryLearningEntry,
+          },
+        });
+      }
+    } else {
+      logs.push(`${order.id}: waitlist skipped (${mode})`);
+
+      const waitlistSkippedLearningEntry = createLearningEntryForOrder(
+        order,
+        "WAITLIST_RECOVERY_ATTEMPTED",
+        "NEUTRAL",
+        `Waitlist recovery skipped because autopilot mode is ${mode}.`
+      );
+
+      if (!shouldSilent(mode)) {
+        await supabaseAdmin.from("audit_logs").insert({
+          action: `Waitlist recovery skipped for ${order.id} because autopilot mode is ${mode}.`,
+          staff: "Autopilot",
+          order_id: order.id,
+          meta: {
+            mode,
+            orderAmount: order.amount ?? 0,
+            ...buildIntelligenceMeta(order),
+            learningEntry: waitlistSkippedLearningEntry,
+          },
+        });
+      }
     }
-
-    const updates: Record<string, any> = {};
-
-    if (body.customerName !== undefined) updates.customer_name = body.customerName;
-    if (body.phone !== undefined) updates.phone = body.phone;
-    if (body.orderType !== undefined) updates.order_type = body.orderType;
-    if (body.amount !== undefined) updates.amount = body.amount;
-    if (body.guests !== undefined) updates.guests = body.guests;
-    if (body.reservationTime !== undefined) updates.reservation_time = body.reservationTime;
-    if (body.itemSummary !== undefined) updates.item_summary = body.itemSummary;
-    if (body.status !== undefined) updates.status = body.status;
-    if (body.depositRequired !== undefined) updates.deposit_required = body.depositRequired;
-    if (body.depositPaid !== undefined) updates.deposit_paid = body.depositPaid;
-    if (body.reliabilityScore !== undefined) updates.reliability_score = body.reliabilityScore;
-    if (body.terminalMismatch !== undefined) updates.terminal_mismatch = body.terminalMismatch;
-    if (body.notes !== undefined) updates.notes = body.notes;
-    if (body.assignedStaff !== undefined) updates.assigned_staff = body.assignedStaff;
-    if (body.riskLevel !== undefined) updates.risk_level = body.riskLevel;
-    if (body.protectionReason !== undefined) updates.protection_reason = body.protectionReason;
-
-    const { data, error } = await supabaseAdmin
-      .from("orders")
-      .update(updates)
-      .eq("id", body.id)
-      .select("*")
-      .single();
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json(mapOrderFromDb(data));
-  } catch (error: any) {
-    return NextResponse.json(
-      { error: error?.message || "Failed to update order" },
-      { status: 500 }
-    );
   }
+
+  return NextResponse.json({
+    message: `Autopilot run complete (${mode})`,
+    mode,
+    logs,
+  });
 }

@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { AutopilotQueueItem } from "../types/autopilot";
 import { useAutopilotStore } from "../store/autopilotStore";
 import { findBestWaitlistLead } from "../lib/waitlistEngine";
+import type { PaymentState } from "../lib/domain/restaurant";
 
 type OrderType =
   | "DINE_IN_RESERVATION"
@@ -16,14 +17,6 @@ type OrderStatus =
   | "PAID"
   | "CANCELLED"
   | "NO_SHOW";
-
-type PaymentState =
-  | "PENDING"
-  | "LINK_SENT"
-  | "SCREENSHOT_SUBMITTED"
-  | "VERIFIED"
-  | "SUSPICIOUS"
-  | "BLOCKED";
 
 type RestaurantOrder = {
   id: string;
@@ -47,6 +40,9 @@ type RestaurantOrder = {
   riskLevel?: "LOW" | "MED" | "HIGH";
   protectionReason?: string;
   createdAt?: string;
+  awaitingDetails?: boolean;
+  recoverySourceOrderId?: string;
+  autoReleaseEligible?: boolean;
 };
 
 type WaitlistLead = {
@@ -58,6 +54,8 @@ type WaitlistLead = {
   responseSpeedScore: number;
   reliabilityScore: number;
 };
+
+const MESSAGE_LIMIT = 300;
 
 function formatAutopilotAction(action: string) {
   switch (action) {
@@ -82,10 +80,160 @@ function formatAutopilotAction(action: string) {
   }
 }
 
+function getApprovalButtonLabel(action: string) {
+  switch (action) {
+    case "SEND_REMINDER":
+      return "Approve & Send";
+    case "OFFER_WAITLIST":
+      return "Approve & Send";
+    case "SEND_PAYMENT_LINK":
+      return "Approve & Open";
+    default:
+      return "Approve & Run";
+  }
+}
+
 function buildWhatsAppLink(phone: string, message: string) {
   const digits = phone.replace(/\D/g, "");
   const normalised = digits.startsWith("0") ? `6${digits}` : digits;
   return `https://wa.me/${normalised}?text=${encodeURIComponent(message)}`;
+}
+
+function getOrderTypeLabel(orderType: OrderType) {
+  switch (orderType) {
+    case "DINE_IN_RESERVATION":
+      return "dine-in reservation";
+    case "PREORDER_PICKUP":
+      return "pickup order";
+    case "DELIVERY_PREORDER":
+      return "delivery preorder";
+    default:
+      return "booking/order";
+  }
+}
+
+function getSafeDepositAmount(order: RestaurantOrder) {
+  const existingDeposit = Number(order.depositAmount ?? 0);
+  const amount = Number(order.amount ?? 0);
+
+  if (existingDeposit > 0) return existingDeposit;
+  if (order.depositRequired && amount > 0) {
+    return Math.round(amount * 0.3 * 100) / 100;
+  }
+
+  return 0;
+}
+
+function getAmountDueNow(order: RestaurantOrder) {
+  const amount = Number(order.amount ?? 0);
+  const deposit = getSafeDepositAmount(order);
+
+  if (order.status === "PAID") return 0;
+
+  if (order.depositRequired && !order.depositPaid) {
+    return deposit;
+  }
+
+  if (order.depositRequired && order.depositPaid) {
+    return Math.max(amount - deposit, 0);
+  }
+
+  return amount;
+}
+
+function needsRecoveredOrderSetup(order: RestaurantOrder) {
+  return Boolean(
+    order.awaitingDetails ||
+      (order.recoverySourceOrderId && Number(order.amount ?? 0) <= 0)
+  );
+}
+
+function buildReminderMessage(order: RestaurantOrder) {
+  const amountDueNow = getAmountDueNow(order);
+
+  if (amountDueNow > 0) {
+    return `Hi ${order.customerName} 👋\n\nReminder for your ${getOrderTypeLabel(
+      order.orderType
+    )} (${order.id}).\n\nAmount due now: RM ${amountDueNow}. Please complete payment to keep your slot protected.\n\n— Valsentra`;
+  }
+
+  return `Hi ${order.customerName} 👋\n\nReminder for your ${getOrderTypeLabel(
+    order.orderType
+  )} (${order.id}).\n\nPlease reply YES to confirm your attendance.\n\n— Valsentra`;
+}
+
+function buildWaitlistMessage(order: RestaurantOrder, lead: WaitlistLead) {
+  return `Hi ${lead.customerName} 👋\n\nA ${getOrderTypeLabel(
+    order.orderType
+  )} slot just opened.\n\nReply YES if you want to take it. We will confirm your actual order details after you reply.\n\n— Valsentra`;
+}
+
+function isCommunicationAction(action: AutopilotQueueItem["action"]) {
+  return (
+    action === "SEND_REMINDER" ||
+    action === "OFFER_WAITLIST" ||
+    action === "SEND_PAYMENT_LINK"
+  );
+}
+
+function getSeverity(item: AutopilotQueueItem) {
+  if (item.intelligenceSeverity) return item.intelligenceSeverity;
+
+  const collapse = Number(item.collapseProbability ?? 0);
+
+  if (collapse >= 85 || item.action === "RELEASE_SLOT" || item.action === "FLAG_FRAUD") {
+    return "CRITICAL";
+  }
+
+  if (collapse >= 65 || item.action === "BLOCK_ORDER") {
+    return "WARNING";
+  }
+
+  if (collapse >= 35 || item.action === "SEND_REMINDER") {
+    return "WATCH";
+  }
+
+  return "INFO";
+}
+
+function severityClasses(item: AutopilotQueueItem) {
+  const severity = getSeverity(item);
+
+  if (severity === "CRITICAL") {
+    return {
+      card: "border-red-200 bg-red-50",
+      badge: "border-red-200 bg-red-100 text-red-700",
+      dot: "bg-red-500",
+    };
+  }
+
+  if (severity === "WARNING") {
+    return {
+      card: "border-orange-200 bg-orange-50",
+      badge: "border-orange-200 bg-orange-100 text-orange-700",
+      dot: "bg-orange-500",
+    };
+  }
+
+  if (severity === "WATCH") {
+    return {
+      card: "border-yellow-200 bg-yellow-50",
+      badge: "border-yellow-200 bg-yellow-100 text-yellow-700",
+      dot: "bg-yellow-500",
+    };
+  }
+
+  return {
+    card: "border-neutral-200 bg-white",
+    badge: "border-neutral-200 bg-neutral-100 text-neutral-700",
+    dot: "bg-neutral-400",
+  };
+}
+
+function formatLearningWeight(value?: number) {
+  const signal = Number(value ?? 0);
+  if (signal > 0) return `+${signal}`;
+  return String(signal);
 }
 
 async function fetchOrders(): Promise<RestaurantOrder[]> {
@@ -118,14 +266,40 @@ async function patchOrder(id: string, updates: Partial<RestaurantOrder>) {
   return data;
 }
 
-async function logAudit(action: string, staff: string, orderId: string) {
+async function logAudit(
+  action: string,
+  staff: string,
+  orderId: string,
+  meta: Record<string, any> = {}
+) {
   await fetch("/api/audit", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ action, staff, orderId }),
+    body: JSON.stringify({ action, staff, orderId, meta }),
   });
+}
+
+async function rejectAutopilotAction(item: AutopilotQueueItem) {
+  await logAudit(
+    `Autopilot recommendation rejected: ${formatAutopilotAction(item.action)}`,
+    "Owner",
+    item.orderId,
+    {
+      rule: item.ruleKey,
+      reason: item.reason,
+      action: item.action,
+      estimatedRevenueProtected: item.estimatedRevenueProtected ?? 0,
+      requiresHumanAction: false,
+      rejected: true,
+      collapseProbability: item.collapseProbability,
+      collapseRiskTier: item.collapseRiskTier,
+      ghostPingUrgency: item.ghostPingUrgency,
+      ghostPingReasoning: item.ghostPingReasoning,
+      learningSignal: item.learningSignal,
+    }
+  );
 }
 
 async function executeAutopilotAction(item: AutopilotQueueItem) {
@@ -136,25 +310,71 @@ async function executeAutopilotAction(item: AutopilotQueueItem) {
     throw new Error(`Order ${item.orderId} not found`);
   }
 
+  await logAudit(
+    `Autopilot recommendation approved: ${formatAutopilotAction(item.action)}`,
+    "Owner",
+    item.orderId,
+    {
+      rule: item.ruleKey,
+      reason: item.reason,
+      action: item.action,
+      estimatedRevenueProtected: item.estimatedRevenueProtected ?? 0,
+      requiresHumanAction: false,
+      approved: true,
+      collapseProbability: item.collapseProbability,
+      collapseRiskTier: item.collapseRiskTier,
+      recommendedIntervention: item.recommendedIntervention,
+      ghostPingUrgency: item.ghostPingUrgency,
+      ghostPingReasoning: item.ghostPingReasoning,
+      aiConfidence: item.aiConfidence,
+      learningSignal: item.learningSignal,
+    }
+  );
+
+  const paymentActions = new Set([
+    "REQUIRE_DEPOSIT",
+    "SEND_PAYMENT_LINK",
+    "SEND_REMINDER",
+    "BLOCK_ORDER",
+    "FLAG_FRAUD",
+  ]);
+
+  if (needsRecoveredOrderSetup(order) && paymentActions.has(item.action)) {
+    throw new Error(
+      `${order.customerName} is still awaiting setup. Enter the real amount and summary first.`
+    );
+  }
+
   if (item.action === "SEND_PAYMENT_LINK") {
+    const amountDueNow = getAmountDueNow(order);
+    const depositAmount = getSafeDepositAmount(order);
+
     await patchOrder(order.id, {
       status: "PAYMENT_SENT",
-      paymentState: "LINK_SENT",
-      notes: `Autopilot sent payment link. Deposit due: RM ${
-        order.depositAmount ?? Math.round(order.amount * 0.3 * 100) / 100
-      }`,
+      paymentState: "PENDING",
+      depositAmount,
+      notes: `Autopilot prepared payment link. Amount due now: RM ${amountDueNow}.`,
     });
 
-    await logAudit("Autopilot executed payment link send", "Autopilot", order.id);
+    await logAudit("Autopilot prepared payment link", "Autopilot", order.id);
     window.open(`/pay/${order.id}`, "_blank");
-    return;
+    return { messageSent: false };
   }
 
   if (item.action === "SEND_REMINDER") {
-    const message = `Hi ${order.customerName}, this is a reminder that your booking/order (${order.id}) is coming up soon. Please complete payment or confirm your attendance.`;
-    window.open(buildWhatsAppLink(order.phone, message), "_blank");
+    const opened = window.open(
+      buildWhatsAppLink(order.phone, buildReminderMessage(order)),
+      "_blank"
+    );
+
+    if (!opened) {
+      throw new Error(
+        "WhatsApp popup was blocked. Please allow popups or retry from the button."
+      );
+    }
+
     await logAudit("Autopilot sent reminder", "Autopilot", order.id);
-    return;
+    return { messageSent: true };
   }
 
   if (item.action === "BLOCK_ORDER") {
@@ -166,12 +386,12 @@ async function executeAutopilotAction(item: AutopilotQueueItem) {
     });
 
     await logAudit("Autopilot blocked order", "Autopilot", order.id);
-    return;
+    return { messageSent: false };
   }
 
   if (item.action === "FLAG_FRAUD") {
     await patchOrder(order.id, {
-      paymentState: "SUSPICIOUS",
+      paymentState: "BLOCKED",
       paymentVerified: false,
       terminalMismatch: true,
       notes: "Autopilot flagged suspicious payment activity.",
@@ -179,18 +399,19 @@ async function executeAutopilotAction(item: AutopilotQueueItem) {
     });
 
     await logAudit("Autopilot flagged fraud", "Autopilot", order.id);
-    return;
+    return { messageSent: false };
   }
 
   if (item.action === "RELEASE_SLOT") {
     await patchOrder(order.id, {
       status: "CANCELLED",
-      notes: "Autopilot released the slot due to unpaid risk conditions.",
-      protectionReason: "Slot released by autopilot",
+      notes: "Autopilot released the slot after owner approval.",
+      protectionReason: "Slot released by autopilot approval",
+      autoReleaseEligible: false,
     });
 
-    await logAudit("Autopilot released slot", "Autopilot", order.id);
-    return;
+    await logAudit("Autopilot released slot after approval", "Autopilot", order.id);
+    return { messageSent: false };
   }
 
   if (item.action === "OFFER_WAITLIST") {
@@ -208,17 +429,40 @@ async function executeAutopilotAction(item: AutopilotQueueItem) {
       throw new Error("No suitable waitlist lead found");
     }
 
-    const message = `Hi ${recovery.bestLead.customerName}, we just opened a ${order.orderType
-      .replaceAll("_", " ")
-      .toLowerCase()} slot/order worth RM ${order.amount}. Would you like it?`;
+    const opened = window.open(
+      buildWhatsAppLink(
+        recovery.bestLead.phone,
+        buildWaitlistMessage(order, recovery.bestLead)
+      ),
+      "_blank"
+    );
 
-    window.open(buildWhatsAppLink(recovery.bestLead.phone, message), "_blank");
+    if (!opened) {
+      throw new Error(
+        "WhatsApp popup was blocked. Please allow popups or retry from the button."
+      );
+    }
+
     await logAudit(
       `Autopilot offered slot to waitlist lead ${recovery.bestLead.customerName}`,
       "Autopilot",
-      order.id
+      order.id,
+      {
+        rule: item.ruleKey,
+        selectedLeadName: recovery.bestLead.customerName,
+        recoveryScore: recovery.recoveryScore,
+        recoverableRevenue: recovery.recoverableRevenue,
+      }
     );
-    return;
+
+    await patchOrder(order.id, {
+      notes: `${order.notes || ""} | Autopilot offered this slot to waitlist lead ${
+        recovery.bestLead.customerName
+      }.`,
+      protectionReason: "Waitlist offer prepared by autopilot",
+    });
+
+    return { messageSent: true };
   }
 
   if (item.action === "REDUCE_RELIABILITY") {
@@ -230,68 +474,115 @@ async function executeAutopilotAction(item: AutopilotQueueItem) {
     });
 
     await logAudit("Autopilot reduced customer reliability", "Autopilot", order.id);
-    return;
+    return { messageSent: false };
   }
 
   if (item.action === "REQUIRE_DEPOSIT") {
-    const depositAmount =
-      order.depositAmount ?? Math.round(order.amount * 0.3 * 100) / 100;
+    const depositAmount = getSafeDepositAmount(order);
+    const finalDepositAmount =
+      depositAmount > 0
+        ? depositAmount
+        : Math.round(Number(order.amount ?? 0) * 0.3 * 100) / 100;
 
     await patchOrder(order.id, {
       depositRequired: true,
-      depositAmount,
-      notes: `Autopilot required deposit of RM ${depositAmount}.`,
+      depositAmount: finalDepositAmount,
+      notes: `Autopilot required deposit of RM ${finalDepositAmount}.`,
     });
 
     await logAudit("Autopilot required deposit", "Autopilot", order.id);
-    return;
+    return { messageSent: false };
   }
+
+  return { messageSent: false };
 }
 
 export default function AutopilotQueuePanel() {
-  const { queue, markQueueItemDone, markQueueItemSkipped, revenueSaved } =
-    useAutopilotStore();
+  const {
+    queue,
+    approveQueueItem,
+    rejectQueueItem,
+    markQueueItemDone,
+    markQueueItemSkipped,
+    revenueSaved,
+  } = useAutopilotStore();
 
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [runningSweep, setRunningSweep] = useState(false);
   const [lastSweepMessage, setLastSweepMessage] = useState("");
+  const [messagesUsed, setMessagesUsed] = useState(0);
 
   const queuedItems = useMemo(
     () => queue.filter((item) => item.status === "QUEUED"),
     [queue]
   );
 
-  const timeCriticalActions = useMemo(
-    () =>
-      queuedItems.filter(
-        (item) =>
-          item.action === "SEND_REMINDER" ||
-          item.action === "RELEASE_SLOT" ||
-          item.action === "OFFER_WAITLIST"
-      ),
+  const readyToSendActions = useMemo(
+    () => queuedItems.filter((item) => isCommunicationAction(item.action)),
     [queuedItems]
   );
 
-  async function handleExecute(item: AutopilotQueueItem) {
+  const criticalQueueItems = useMemo(
+    () => queuedItems.filter((item) => getSeverity(item) === "CRITICAL"),
+    [queuedItems]
+  );
+
+  const learningSignals = useMemo(
+    () => queue.filter((item) => item.learningSignal).slice(0, 5),
+    [queue]
+  );
+
+  async function handleApproveAndExecute(item: AutopilotQueueItem) {
     try {
       setExecutingId(item.id);
-      await executeAutopilotAction(item);
+      approveQueueItem(item.id, "Owner");
+      const result = await executeAutopilotAction(item);
+
+      if (result.messageSent) {
+        setMessagesUsed((prev) => prev + 1);
+      }
+
       markQueueItemDone(item.id);
     } catch (error) {
       console.error(error);
+      markQueueItemSkipped(item.id);
       const message =
-        error instanceof Error ? error.message : "Failed to execute action";
+        error instanceof Error ? error.message : "Failed to execute approved action";
       alert(message);
     } finally {
       setExecutingId(null);
     }
   }
 
-  async function handleRunSweep() {
-    const itemsToRun = [...queuedItems];
+  async function handleReject(item: AutopilotQueueItem) {
+    try {
+      setExecutingId(item.id);
+      await rejectAutopilotAction(item);
+      rejectQueueItem(item.id, "Owner");
+    } catch (error) {
+      console.error(error);
+      const message =
+        error instanceof Error ? error.message : "Failed to reject action";
+      alert(message);
+    } finally {
+      setExecutingId(null);
+    }
+  }
+
+  async function handleApproveSweep() {
+    const itemsToRun = queuedItems.filter(
+      (item) => !isCommunicationAction(item.action)
+    );
+    const skippedCommunicationCount = queuedItems.length - itemsToRun.length;
 
     if (itemsToRun.length === 0) {
-      setLastSweepMessage("No queued actions to execute.");
+      setLastSweepMessage(
+        skippedCommunicationCount > 0
+          ? `${skippedCommunicationCount} message action${
+              skippedCommunicationCount === 1 ? " is" : "s are"
+            } ready. Approve them one by one to avoid browser popup blocking.`
+          : "No queued actions to approve."
+      );
       return;
     }
 
@@ -302,6 +593,7 @@ export default function AutopilotQueuePanel() {
 
       for (const item of itemsToRun) {
         try {
+          approveQueueItem(item.id, "Owner");
           await executeAutopilotAction(item);
           markQueueItemDone(item.id);
           completed += 1;
@@ -314,15 +606,22 @@ export default function AutopilotQueuePanel() {
         }
       }
 
+      const messageSuffix =
+        skippedCommunicationCount > 0
+          ? ` ${skippedCommunicationCount} message action${
+              skippedCommunicationCount === 1 ? " was" : "s were"
+            } left for one-by-one approval.`
+          : "";
+
       if (failures.length === 0) {
         setLastSweepMessage(
-          `Sweep complete. Executed ${completed} queued action${
+          `Approval sweep complete. Ran ${completed} approved action${
             completed === 1 ? "" : "s"
-          }.`
+          }.${messageSuffix}`
         );
       } else {
         setLastSweepMessage(
-          `Sweep complete. Executed ${completed}, skipped ${failures.length}.`
+          `Approval sweep complete. Ran ${completed}, skipped ${failures.length}.${messageSuffix}`
         );
       }
     } finally {
@@ -331,110 +630,255 @@ export default function AutopilotQueuePanel() {
   }
 
   return (
-    <div className="rounded-2xl bg-white/70 p-6 shadow backdrop-blur-md">
-      <div className="mb-4 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+    <div className="rounded-[28px] border border-neutral-200 bg-white p-5 shadow-sm md:p-6">
+      <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
-          <h2 className="text-xl font-semibold">Autopilot Activity</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            Execute revenue-protection actions generated by the rules engine.
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500">
+            AI Operations Rail
+          </p>
+          <h2 className="mt-1 text-2xl font-semibold tracking-tight text-neutral-950">
+            Approval Queue
+          </h2>
+          <p className="mt-1 max-w-2xl text-sm text-neutral-500">
+            Review Valsentra recommendations before they execute. This is the human override layer for autonomous revenue protection.
           </p>
         </div>
 
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={handleRunSweep}
-            disabled={runningSweep || queuedItems.length === 0}
-            className="rounded-lg bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
-          >
-            {runningSweep ? "Running Sweep..." : "Run Sweep Now"}
-          </button>
-        </div>
+        <button
+          onClick={handleApproveSweep}
+          disabled={runningSweep || queuedItems.length === 0}
+          className="rounded-2xl bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+        >
+          {runningSweep ? "Approving..." : "Approve Safe Sweep"}
+        </button>
       </div>
 
-      <div className="mb-5 grid gap-3 md:grid-cols-3">
-        <div className="rounded-xl border p-4">
-          <div className="text-sm text-gray-500">Revenue Saved</div>
-          <div className="mt-1 text-2xl font-bold text-green-600">
+      <div className="mb-5 grid gap-3 md:grid-cols-4">
+        <div className="rounded-2xl border border-green-200 bg-green-50 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-green-700">
+            Revenue Protected
+          </div>
+          <div className="mt-1 text-2xl font-bold text-green-700">
             RM {revenueSaved.toFixed(2)}
           </div>
         </div>
 
-        <div className="rounded-xl border p-4">
-          <div className="text-sm text-gray-500">Queued Actions</div>
-          <div className="mt-1 text-2xl font-bold">{queuedItems.length}</div>
+        <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-neutral-500">
+            Pending Approval
+          </div>
+          <div className="mt-1 text-2xl font-bold text-neutral-950">
+            {queuedItems.length}
+          </div>
         </div>
 
-        <div className="rounded-xl border p-4">
-          <div className="text-sm text-gray-500">Time-Critical Actions</div>
-          <div className="mt-1 text-2xl font-bold">{timeCriticalActions.length}</div>
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-red-700">
+            Critical
+          </div>
+          <div className="mt-1 text-2xl font-bold text-red-700">
+            {criticalQueueItems.length}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-blue-700">
+            Messages Used
+          </div>
+          <div className="mt-1 text-2xl font-bold text-blue-700">
+            {messagesUsed} / {MESSAGE_LIMIT}
+          </div>
+          {messagesUsed >= MESSAGE_LIMIT * 0.8 ? (
+            <div className="mt-1 text-xs text-orange-600">
+              Approaching included message limit
+            </div>
+          ) : null}
         </div>
       </div>
 
+      {learningSignals.length > 0 ? (
+        <div className="mb-5 rounded-2xl border border-purple-200 bg-purple-50 p-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-purple-700">
+            Continuous Learning Feed
+          </p>
+          <p className="mt-1 text-sm text-purple-900">
+            Signals Valsentra is using to improve future revenue protection decisions.
+          </p>
+
+          <div className="mt-3 space-y-2">
+            {learningSignals.map((item) => {
+              const signal = item.learningSignal;
+              if (!signal) return null;
+
+              return (
+                <div
+                  key={`${item.id}-learning`}
+                  className="flex flex-col gap-2 rounded-xl border border-purple-100 bg-white px-4 py-3 md:flex-row md:items-center md:justify-between"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-purple-950">
+                      {signal.learningSummary}
+                    </p>
+                    <p className="mt-1 text-xs text-purple-700">
+                      {signal.eventType} · {signal.outcome}
+                    </p>
+                  </div>
+
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                      signal.signalWeight > 0
+                        ? "bg-green-100 text-green-700"
+                        : signal.signalWeight < 0
+                          ? "bg-red-100 text-red-700"
+                          : "bg-neutral-100 text-neutral-600"
+                    }`}
+                  >
+                    {formatLearningWeight(signal.signalWeight)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      {readyToSendActions.length > 0 ? (
+        <div className="mb-4 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+          {readyToSendActions.length} message action
+          {readyToSendActions.length === 1 ? " is" : "s are"} ready. Approve
+          them one by one so the browser does not block WhatsApp/payment popups.
+        </div>
+      ) : null}
+
       {lastSweepMessage ? (
-        <div className="mb-4 rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-700">
+        <div className="mb-4 rounded-2xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-700">
           {lastSweepMessage}
         </div>
       ) : null}
 
       <div className="space-y-3">
         {queue.length === 0 && (
-          <div className="text-sm text-gray-500">No autopilot actions yet.</div>
+          <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-5 text-sm text-neutral-500">
+            No approval items yet.
+          </div>
         )}
 
-        {queue.map((item) => (
-          <div
-            key={item.id}
-            className="flex items-center justify-between rounded-xl border p-4"
-          >
-            <div>
-              <div className="font-semibold">{item.customerName}</div>
+        {queue.map((item) => {
+          const classes = severityClasses(item);
+          const severity = getSeverity(item);
 
-              <div className="text-sm text-gray-600">
-                <span className="font-medium">Action:</span>{" "}
-                {formatAutopilotAction(item.action)}
-              </div>
+          return (
+            <div
+              key={item.id}
+              className={`rounded-2xl border p-4 ${classes.card}`}
+            >
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`h-2.5 w-2.5 rounded-full ${classes.dot}`} />
+                    <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${classes.badge}`}>
+                      {severity}
+                    </span>
+                    <span className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-600">
+                      {item.status}
+                    </span>
+                    {typeof item.collapseProbability === "number" ? (
+                      <span className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-700">
+                        Collapse {item.collapseProbability}%
+                      </span>
+                    ) : null}
+                    {item.ghostPingUrgency ? (
+                      <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                        Ghost Ping {item.ghostPingUrgency}
+                      </span>
+                    ) : null}
+                  </div>
 
-              <div className="text-sm text-gray-600">
-                <span className="font-medium">Why:</span> {item.reason}
-              </div>
+                  <div className="mt-3">
+                    <div className="text-base font-semibold text-neutral-950">
+                      {item.customerName}
+                    </div>
 
-              {item.estimatedRevenueProtected ? (
-                <div className="text-sm text-green-600">
-                  <span className="font-medium">Impact:</span> Protect RM{" "}
-                  {item.estimatedRevenueProtected.toFixed(2)}
+                    <div className="mt-1 text-sm text-neutral-700">
+                      <span className="font-medium">Recommended action:</span>{" "}
+                      {formatAutopilotAction(item.action)}
+                    </div>
+
+                    <div className="mt-1 text-sm text-neutral-700">
+                      <span className="font-medium">Why:</span> {item.reason}
+                    </div>
+
+                    {item.ghostPingReasoning ? (
+                      <div className="mt-2 rounded-xl border border-blue-100 bg-white/80 px-3 py-2 text-xs text-blue-800">
+                        <span className="font-semibold">Ghost Ping reasoning:</span>{" "}
+                        {item.ghostPingReasoning}
+                      </div>
+                    ) : null}
+
+                    {item.learningSignal ? (
+                      <div className="mt-2 rounded-xl border border-purple-100 bg-white/80 px-3 py-2 text-xs text-purple-800">
+                        <span className="font-semibold">Learning signal:</span>{" "}
+                        {item.learningSignal.learningSummary}
+                      </div>
+                    ) : null}
+
+                    {isCommunicationAction(item.action) && item.status === "QUEUED" ? (
+                      <div className="mt-2 text-xs font-medium text-blue-700">
+                        Requires one-by-one approval because it opens a message/payment window.
+                      </div>
+                    ) : null}
+
+                    <div className="mt-2 flex flex-wrap gap-3 text-xs text-neutral-500">
+                      <span>{new Date(item.createdAt).toLocaleString()}</span>
+
+                      {item.reviewedBy ? (
+                        <span>Reviewed by {item.reviewedBy}</span>
+                      ) : null}
+
+                      {item.aiConfidence ? (
+                        <span>AI confidence {item.aiConfidence}%</span>
+                      ) : null}
+
+                      {item.estimatedRevenueProtected ? (
+                        <span className="font-semibold text-green-700">
+                          Protect RM {item.estimatedRevenueProtected.toFixed(2)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
-              ) : null}
 
-              <div className="mt-1 text-xs text-gray-400">
-                {new Date(item.createdAt).toLocaleString()}
+                <div className="flex shrink-0 flex-wrap gap-2 md:justify-end">
+                  {item.status === "QUEUED" ? (
+                    <>
+                      <button
+                        onClick={() => handleApproveAndExecute(item)}
+                        disabled={executingId === item.id || runningSweep}
+                        className="rounded-xl bg-green-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                      >
+                        {executingId === item.id
+                          ? "Running..."
+                          : getApprovalButtonLabel(item.action)}
+                      </button>
+
+                      <button
+                        onClick={() => handleReject(item)}
+                        disabled={executingId === item.id || runningSweep}
+                        className="rounded-xl bg-red-100 px-3 py-2 text-sm font-medium text-red-700 disabled:opacity-50"
+                      >
+                        Reject
+                      </button>
+                    </>
+                  ) : (
+                    <span className="rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-500">
+                      {item.status}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
-
-            <div className="flex gap-2">
-              {item.status === "QUEUED" ? (
-                <>
-                  <button
-                    onClick={() => handleExecute(item)}
-                    disabled={executingId === item.id || runningSweep}
-                    className="rounded-lg bg-green-600 px-3 py-1 text-sm text-white disabled:opacity-50"
-                  >
-                    {executingId === item.id ? "Executing..." : "Execute"}
-                  </button>
-
-                  <button
-                    onClick={() => markQueueItemSkipped(item.id)}
-                    disabled={executingId === item.id || runningSweep}
-                    className="rounded-lg bg-gray-200 px-3 py-1 text-sm disabled:opacity-50"
-                  >
-                    Skip
-                  </button>
-                </>
-              ) : (
-                <span className="text-sm text-gray-500">{item.status}</span>
-              )}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

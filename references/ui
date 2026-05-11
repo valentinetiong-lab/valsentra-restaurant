@@ -1,0 +1,190 @@
+# VALSENTRA — BILLION-DOLLAR AGaaS DESIGN SYSTEM
+
+Valsentra is NOT a booking app.
+
+Valsentra is an autonomous operational intelligence and revenue protection system for restaurants and service businesses.
+
+The interface should feel like:
+- a high-end operational control center
+- an AI-powered business operating system
+- a silent autonomous operator protecting revenue in real time
+
+The product should emotionally feel:
+- calm
+- intelligent
+- expensive
+- trusted
+- precise
+- enterprise-grade
+- operationally powerful
+- visually restrained
+
+The UI should NOT feel:
+- like a startup template
+- like a Tailwind demo
+- like a school project
+- overly colorful
+- cluttered
+- playful
+- cartoonish
+- “AI generated”
+- generic SaaS
+
+--------------------------------------------------
+VISUAL DIRECTION
+--------------------------------------------------
+
+Use the quality level and restraint of:
+- Stripe
+- Linear
+- Vercel
+- Apple
+- Ramp
+- Notion
+- modern premium fintech platforms
+- enterprise operational software
+
+NOT:
+- Dribbble fantasy UI
+- giant gradients
+- neon
+- oversized icons
+- random colorful cards
+- template dashboards
+
+--------------------------------------------------
+CORE DESIGN PRINCIPLES
+--------------------------------------------------
+
+1. RESTRAINT
+The UI should feel confident and minimal.
+Do not overload screens.
+
+2. SPACING
+Large breathing room everywhere.
+Premium whitespace.
+No cramped layouts.
+
+3. TYPOGRAPHY-FIRST
+Typography drives hierarchy.
+Use clean, modern, expensive-looking hierarchy.
+
+4. QUIET POWER
+The dashboard should feel operationally powerful without screaming visually.
+
+5. INFORMATION CLARITY
+Owners should instantly understand:
+- what is protected
+- what is risky
+- what was recovered
+- what needs attention
+- what the AI system handled automatically
+
+--------------------------------------------------
+VISUAL RULES
+--------------------------------------------------
+
+- white / warm off-white background
+- subtle gray layering
+- thin soft borders
+- extremely subtle shadows
+- large rounded cards
+- premium spacing system
+- muted enterprise color palette
+- black/dark gray typography
+- small uppercase labels with letter spacing
+- soft status tinting only:
+  - green = protected
+  - red = critical
+  - amber = warning
+  - blue = intelligence/learning
+
+NO:
+- bright blue buttons everywhere
+- giant gradients
+- glowing effects
+- excessive glassmorphism
+- cluttered sidebars
+- dashboard spam
+- oversized icons
+- random widgets
+
+--------------------------------------------------
+OPERATIONAL FEELING
+--------------------------------------------------
+
+The dashboard should feel like:
+- an AI is constantly monitoring operations
+- revenue is actively being protected
+- autonomous systems are working in the background
+- risk is being managed in real time
+- the owner is seeing a live operational intelligence layer
+
+The interface should feel “alive” through:
+- intelligence timelines
+- operational summaries
+- risk changes
+- recovery events
+- autopilot actions
+- system health indicators
+
+--------------------------------------------------
+OWNER EXPERIENCE
+--------------------------------------------------
+
+When the owner opens the dashboard they should immediately feel:
+
+“This system is handling operations for me.”
+
+NOT:
+“This is another admin dashboard.”
+
+--------------------------------------------------
+DASHBOARD STRUCTURE
+--------------------------------------------------
+
+1. Executive operational header
+2. Live operational risk alert
+3. KPI intelligence grid
+4. Revenue protection analytics
+5. Autonomous operator activity
+6. System health overview
+7. AI operational briefing
+8. Intelligence timeline
+9. Risk exposure monitoring
+10. Recovery/replacement activity
+
+--------------------------------------------------
+TECHNICAL REQUIREMENTS
+--------------------------------------------------
+
+- Next.js App Router
+- TypeScript
+- TailwindCSS
+- production-grade component architecture
+- reusable UI primitives
+- consistent spacing tokens
+- maintainable component structure
+- no giant monolithic page files
+
+--------------------------------------------------
+IMPORTANT
+--------------------------------------------------
+
+Do NOT redesign randomly.
+
+Preserve:
+- existing business logic
+- operational flows
+- system architecture
+
+Improve:
+- visual hierarchy
+- consistency
+- spacing
+- polish
+- clarity
+- operational feeling
+
+The final result should feel like:
+“a billion-dollar autonomous operations platform.”

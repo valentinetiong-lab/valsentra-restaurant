@@ -1,12 +1,17 @@
+import type { PaymentState } from "./domain/restaurant";
 import type { ReliabilityEvent } from "./reliabilityEngine";
+import {
+  blockPaymentTransition,
+  createUnpaidPaymentState,
+  failPaymentTransition,
+  getPaymentStateLabel,
+  isPaymentLocked,
+  isPaymentVerified,
+  sendPaymentLinkTransition,
+  submitScreenshotTransition,
+} from "./engines/paymentEngine";
 
-export type PaymentState =
-  | "PENDING"
-  | "LINK_SENT"
-  | "SCREENSHOT_SUBMITTED"
-  | "VERIFIED"
-  | "SUSPICIOUS"
-  | "BLOCKED";
+export type { PaymentState };
 
 export type PaymentVerificationDecision = {
   paymentState: PaymentState;
@@ -17,13 +22,16 @@ export type PaymentVerificationDecision = {
   reason: string;
 };
 
-export function sendPaymentLinkTransition(): PaymentState {
-  return "LINK_SENT";
-}
-
-export function submitScreenshotTransition(): PaymentState {
-  return "SCREENSHOT_SUBMITTED";
-}
+export {
+  blockPaymentTransition,
+  createUnpaidPaymentState,
+  failPaymentTransition,
+  getPaymentStateLabel,
+  isPaymentLocked,
+  isPaymentVerified,
+  sendPaymentLinkTransition,
+  submitScreenshotTransition,
+};
 
 export function verifyPaymentAmount(
   expectedAmount: number,
@@ -31,7 +39,7 @@ export function verifyPaymentAmount(
 ): PaymentVerificationDecision {
   if (Number.isNaN(receivedAmount) || receivedAmount <= 0) {
     return {
-      paymentState: "SUSPICIOUS",
+      paymentState: "FAILED",
       paymentVerified: false,
       terminalMismatch: true,
       shouldBlock: true,
@@ -60,3 +68,4 @@ export function verifyPaymentAmount(
     reason: "Payment verified successfully",
   };
 }
+

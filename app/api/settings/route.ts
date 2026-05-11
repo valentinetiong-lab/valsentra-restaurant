@@ -1,4 +1,3 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "../../lib/admin";
 
@@ -11,6 +10,7 @@ function mapSettingsFromDb(row: Record<string, any>) {
     lowReliabilityThreshold: row.low_reliability_threshold,
     autoBlockHighValueUnpaid: row.auto_block_high_value_unpaid,
     hardBlockTerminalMismatch: row.hard_block_terminal_mismatch,
+    autopilotMode: row.autopilot_mode ?? "SEMI_AUTO",
     updatedAt: row.updated_at,
   };
 }
@@ -43,11 +43,13 @@ export async function PATCH(request: NextRequest) {
     const payload: Record<string, any> = { id: 1 };
 
     if (body.dineInDepositGuestsThreshold !== undefined) {
-      payload.dine_in_deposit_guests_threshold = body.dineInDepositGuestsThreshold;
+      payload.dine_in_deposit_guests_threshold =
+        body.dineInDepositGuestsThreshold;
     }
 
     if (body.pickupDepositAmountThreshold !== undefined) {
-      payload.pickup_deposit_amount_threshold = body.pickupDepositAmountThreshold;
+      payload.pickup_deposit_amount_threshold =
+        body.pickupDepositAmountThreshold;
     }
 
     if (body.requireDeliveryDeposit !== undefined) {
@@ -64,6 +66,10 @@ export async function PATCH(request: NextRequest) {
 
     if (body.hardBlockTerminalMismatch !== undefined) {
       payload.hard_block_terminal_mismatch = body.hardBlockTerminalMismatch;
+    }
+
+    if (body.autopilotMode !== undefined) {
+      payload.autopilot_mode = body.autopilotMode;
     }
 
     const { data, error } = await supabaseAdmin
