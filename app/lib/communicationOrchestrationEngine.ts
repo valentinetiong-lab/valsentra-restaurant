@@ -1,4 +1,5 @@
 import type { RestaurantOrder } from "@/app/lib/domain/restaurant";
+import type { CustomerOperationalMemoryProfile } from "@/app/lib/customerOperationalMemoryEngine";
 import type { OperationalDigitalTwin } from "@/app/lib/operationalDigitalTwinEngine";
 import type { OperationalMemorySnapshot } from "@/app/lib/operationalMemoryEngine";
 import type { OperationalPolicy } from "@/app/lib/policyEngine";
@@ -95,6 +96,9 @@ export type RecoverySequenceDecision = {
     slotUnrecoverable: boolean;
     quietHoursSuppressed: boolean;
     quietHoursOverrideUsed: boolean;
+    reliabilityFactors: string[];
+    memorySignalsUsed: string[];
+    orchestrationBiasesApplied: string[];
   };
   explainability: string[];
 };
@@ -227,11 +231,13 @@ function chooseStep({
   auditRows,
   waitlistAvailability,
   cooldownMinutes,
+  customerMemory,
 }: {
   order: RestaurantOrder;
   auditRows: AuditRow[];
   waitlistAvailability: number;
   cooldownMinutes: number;
+  customerMemory?: CustomerOperationalMemoryProfile | null;
 }): {
   step: RecoverySequenceStep;
   diagnostics: RecoverySequenceDecision["priorityDiagnostics"];
@@ -259,6 +265,17 @@ function chooseStep({
     step = "FRAUD_VERIFICATION";
     selectedReason = "Payment-risk signals require internal fraud/payment verification.";
     reminderSkippedReason = "Fraud uncertainty blocks customer-facing payment outreach.";
+  } else if (
+    paymentUnresolved &&
+    hasPhone &&
+    !slotUnrecoverable &&
+    customerMemory?.ghostRisk &&
+    customerMemory.ghostRisk >= 78 &&
+    lastReminderSentAt
+  ) {
+    step = "ESCALATE_PAYMENT";
+    selectedReason = "Customer memory shows elevated ghost risk after prior reminder, so payment escalation moves earlier.";
+    reminderSkippedReason = "Reminder already exists and ghost-risk memory supports earlier escalation.";
   } else if (paymentUnresolved && hasPhone && !slotUnrecoverable) {
     if (!lastReminderSentAt) {
       step = "PAYMENT_REMINDER";
@@ -315,6 +332,9 @@ function chooseStep({
       slotUnrecoverable,
       quietHoursSuppressed: false,
       quietHoursOverrideUsed: false,
+      reliabilityFactors: customerMemory?.reliabilityFactors ?? [],
+      memorySignalsUsed: customerMemory?.memorySignalsUsed ?? [],
+      orchestrationBiasesApplied: customerMemory?.orchestrationBiasesApplied ?? [],
     },
   };
 }
@@ -331,18 +351,28 @@ function buildMessage({
   channel,
   step,
   recoveryLikelihood,
+  customerMemory,
 }: {
   order: RestaurantOrder;
   channel: CommunicationChannel;
   step: RecoverySequenceStep;
   recoveryLikelihood: number;
+  customerMemory?: CustomerOperationalMemoryProfile | null;
 }): CommunicationProviderMessage {
   // These templates remain provider-agnostic. External sending is performed only by
   // the server-side communication provider layer when live provider env vars exist.
   const name = order.customerName || "Customer";
   const amount = Number(order.depositAmount || order.amount || 0);
+  const reliable = Number(customerMemory?.operationalReliability ?? 0) >= 82;
+  const repeatLate = Number(customerMemory?.lateArrivalCount ?? 0) >= 2;
+  const paymentReminder = reliable
+    ? `Hi ${name}, quick check: your Valsentra order ${order.id} is still awaiting payment confirmation. Please complete it when you can so we can keep the slot protected.`
+    : `Hi ${name}, your Valsentra order ${order.id} is still awaiting payment confirmation. Please complete payment to keep the slot protected.`;
+  const timingBuffer = repeatLate
+    ? " If timing changes, please reply early so the team can protect the slot."
+    : "";
   const bodyByStep: Record<RecoverySequenceStep, string> = {
-    PAYMENT_REMINDER: `Hi ${name}, your Valsentra order ${order.id} is still awaiting payment confirmation. Please complete payment to keep the slot protected.`,
+    PAYMENT_REMINDER: `${paymentReminder}${timingBuffer}`,
     ESCALATE_PAYMENT: `Hi ${name}, your required deposit/payment for ${order.id} is still unresolved. Please verify payment soon so the team can keep your slot active.`,
     REMINDER: `Hi ${name}, your Valsentra order ${order.id} is still awaiting payment confirmation. Please complete payment to keep the slot protected.`,
     ESCALATION: `Hi ${name}, your required deposit/payment for ${order.id} is still unresolved. Please verify payment soon so the team can keep your slot active.`,
@@ -406,6 +436,7 @@ export function orchestrateRecoveryCommunication({
   digitalTwin,
   policy,
   waitlistAvailability,
+  customerMemory,
 }: {
   order: RestaurantOrder;
   auditRows: AuditRow[];
@@ -413,6 +444,7 @@ export function orchestrateRecoveryCommunication({
   digitalTwin: OperationalDigitalTwin;
   policy: OperationalPolicy;
   waitlistAvailability: number;
+  customerMemory?: CustomerOperationalMemoryProfile | null;
 }): RecoverySequenceDecision {
   const baselineCooldown = Math.round(getCooldown("PAYMENT_REMINDER", policy));
   const priority = chooseStep({
@@ -420,6 +452,7 @@ export function orchestrateRecoveryCommunication({
     auditRows,
     waitlistAvailability,
     cooldownMinutes: baselineCooldown,
+    customerMemory,
   });
   const step = priority.step;
   const channel = chooseChannel(order, step);
@@ -434,7 +467,16 @@ export function orchestrateRecoveryCommunication({
   const branchTwin = digitalTwin.branches.find((branch) => branch.id === (order.locationId ?? "loc-primary"));
   const branchFatigue = branchTwin?.metrics.operationalFatigue ?? digitalTwin.organization.metrics.operationalFatigue;
   const vip = Number(order.reliabilityScore ?? 0) >= 95;
-  const communicationFatigue = clamp(attempts * 18 + branchFatigue * 0.35 + (vip ? 12 : 0));
+  const memoryResponsiveness = customerMemory?.communicationResponsiveness ?? null;
+  const memoryTrust = customerMemory?.communicationTrust ?? null;
+  const memoryGhostRisk = customerMemory?.ghostRisk ?? null;
+  const communicationFatigue = clamp(
+    attempts * 18 +
+      branchFatigue * 0.35 +
+      (vip ? 12 : 0) -
+      (memoryResponsiveness !== null && memoryResponsiveness >= 72 ? 8 : 0) -
+      (memoryTrust !== null && memoryTrust >= 78 ? 6 : 0)
+  );
   const suppressionReasons: string[] = [];
   const quietHourActive = isQuietHour() && channel !== "INTERNAL";
   const quietHoursOverrideUsed =
@@ -454,10 +496,12 @@ export function orchestrateRecoveryCommunication({
   const actionProfile = memory.actionProfiles.find((profile) => profile.action === step || profile.action === "SEND_REMINDER");
   const recoveryLikelihood = clamp(
     (actionProfile?.successRate ?? 50) * 0.35 +
-      context.customerResponsiveness * 0.28 +
+      (memoryResponsiveness ?? context.customerResponsiveness) * 0.28 +
       policy.recoveryAggressiveness * 0.18 +
+      (customerMemory?.recoveryCooperationScore ?? 50) * 0.12 +
       waitlistAvailability * 8 -
-      communicationFatigue * 0.16
+      communicationFatigue * 0.16 -
+      (memoryGhostRisk !== null && memoryGhostRisk >= 70 ? 5 : 0)
   );
   const trustRisk = clamp(communicationFatigue * 0.45 + (vip ? 20 : 0) + (step.includes("RELEASE") ? 18 : 0));
   const message = buildMessage({
@@ -465,6 +509,7 @@ export function orchestrateRecoveryCommunication({
     channel,
     step,
     recoveryLikelihood,
+    customerMemory,
   });
 
   return {
@@ -502,12 +547,22 @@ export function orchestrateRecoveryCommunication({
       internalOnly: channel === "INTERNAL",
       quietHoursSuppressed,
       quietHoursOverrideUsed,
+      reliabilityFactors: customerMemory?.reliabilityFactors ?? [],
+      memorySignalsUsed: customerMemory?.memorySignalsUsed ?? [],
+      orchestrationBiasesApplied: customerMemory?.orchestrationBiasesApplied ?? [],
     },
     explainability: [
       `${step} selected from payment state ${order.paymentState ?? "UNPAID"} and collapse ${order.collapseProbability ?? 0}%.`,
       priority.diagnostics.selectedReason,
       ...(priority.diagnostics.reminderSkippedReason ? [priority.diagnostics.reminderSkippedReason] : []),
       `Customer responsiveness climate is ${context.customerResponsiveness}/100.`,
+      ...(customerMemory
+        ? [
+            `Customer memory reliability is ${customerMemory.operationalReliability}/100.`,
+            `Customer memory ghost risk is ${customerMemory.ghostRisk}/100.`,
+            ...customerMemory.orchestrationBiasesApplied,
+          ]
+        : ["No customer-specific operational memory profile was available."]),
       `Branch fatigue is ${branchFatigue}/100.`,
       `Policy recovery aggressiveness is ${policy.recoveryAggressiveness}/100.`,
       ...(quietHoursOverrideUsed

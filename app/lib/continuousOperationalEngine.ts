@@ -11,7 +11,13 @@ import {
   buildCommunicationClimate,
   orchestrateRecoveryCommunication,
 } from "@/app/lib/communicationOrchestrationEngine";
+import { evaluateMultiAgentOperationalBrain } from "@/app/lib/agents/operationalFusionLayer";
 import { createContinuousLearningEntry } from "@/app/lib/continuousLearningLedger";
+import {
+  buildCustomerMemoryTimelineSignals,
+  buildCustomerOperationalMemoryProfiles,
+  getCustomerOperationalMemoryForOrder,
+} from "@/app/lib/customerOperationalMemoryEngine";
 import {
   enrichOrderWithIntelligence,
   mapAndEnrichOrderFromDb,
@@ -88,6 +94,20 @@ function buildIntelligenceMeta(order: RestaurantOrder) {
     locationId: order.locationId,
     locationName: order.locationName,
   };
+}
+
+function mapAgentEscalationToSeverity(level: "LOW" | "WATCH" | "WARNING" | "CRITICAL") {
+  if (level === "CRITICAL") return "CRITICAL" as const;
+  if (level === "WARNING") return "WARNING" as const;
+  if (level === "WATCH") return "WATCH" as const;
+  return "INFO" as const;
+}
+
+function mapAgentSignalToCategory(signal: string | null) {
+  if (signal === "trust downgrade") return "FRAUD" as const;
+  if (signal === "recovery consensus") return "RECOVERY" as const;
+  if (signal === "revenue protection intervention") return "AUTONOMOUS_ACTION" as const;
+  return "AUTONOMOUS_ACTION" as const;
 }
 
 function buildDecisionContext({
@@ -191,6 +211,10 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
     orders,
     auditRows: auditRaw ?? [],
   });
+  const customerOperationalMemoryProfiles = buildCustomerOperationalMemoryProfiles({
+    orders,
+    auditRows: auditRaw ?? [],
+  });
   const waitlistAvailability = waitlistRaw?.length ?? 0;
   const organizationSnapshot = buildMultiLocationIntelligenceSnapshot({
     orders,
@@ -256,12 +280,83 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
     if (event.duplicate) skippedDuplicates += 1;
   }
 
+  if (!shouldSilent(mode)) {
+    for (const profile of customerOperationalMemoryProfiles.slice(0, 25)) {
+      for (const signal of buildCustomerMemoryTimelineSignals(profile)) {
+        const event = await writeOnce(eventKeys, {
+          eventKey: `customer-memory:${profile.customerKey}:${signal.type}:${bucket}`,
+          category: "LEARNING",
+          severity: signal.severity,
+          action: `Customer memory signal: ${signal.type} for ${profile.customerName}.`,
+          orderId: profile.orderIds[0] ?? "CUSTOMER_MEMORY",
+          title: signal.type,
+          summary: signal.summary,
+          reasoning: profile.reliabilityFactors,
+          recommendedAction: "Use customer memory as a bias, not as an automatic final decision.",
+          confidence: Math.max(55, profile.operationalReliability),
+          meta: {
+            customerOperationalMemory: profile,
+            reliabilityFactors: profile.reliabilityFactors,
+            memorySignalsUsed: profile.memorySignalsUsed,
+            orchestrationBiasesApplied: profile.orchestrationBiasesApplied,
+          },
+        });
+        if (event.written) eventsWritten += 1;
+        if (event.duplicate) skippedDuplicates += 1;
+      }
+    }
+  }
+
   for (const order of unresolvedOrders) {
     const intelligenceMeta = buildIntelligenceMeta(order);
     const minutesLeft = minutesUntil(order.slotHoldExpiresAt);
     const orderAuditRows = (auditRaw ?? []).filter(
       (row) => String(row.order_id ?? row.orderId ?? "") === order.id
     );
+    const customerMemory = getCustomerOperationalMemoryForOrder({
+      order,
+      profiles: customerOperationalMemoryProfiles,
+    });
+    const multiAgentDecision = evaluateMultiAgentOperationalBrain({
+      order,
+      activeOrders,
+      auditRows: orderAuditRows,
+      waitlistAvailability,
+      customerMemory,
+    });
+    const multiAgentDiagnostics = {
+      participatingAgents: multiAgentDecision.participatingAgents,
+      fusionDecision: multiAgentDecision.fusionDecision,
+      dominantSignals: multiAgentDecision.dominantSignals,
+      conflictingRecommendations: multiAgentDecision.conflictingRecommendations,
+      finalOperationalReasoning: multiAgentDecision.finalOperationalReasoning,
+      agentDecisions: multiAgentDecision.agentDecisions,
+      escalationLevel: multiAgentDecision.escalationLevel,
+      confidence: multiAgentDecision.confidence,
+    };
+
+    if (!shouldSilent(mode) && multiAgentDecision.timelineSignalType) {
+      const event = await writeOnce(eventKeys, {
+        eventKey: `multi-agent:${order.id}:${multiAgentDecision.timelineSignalType}:${bucket}`,
+        category: mapAgentSignalToCategory(multiAgentDecision.timelineSignalType),
+        severity: mapAgentEscalationToSeverity(multiAgentDecision.escalationLevel),
+        action: `Multi-agent operational brain detected ${multiAgentDecision.timelineSignalType} for ${order.id}.`,
+        orderId: order.id,
+        title: "Multi-agent operational brain",
+        summary: `${multiAgentDecision.fusionDecision.toLowerCase().replaceAll("_", " ")} selected by deterministic operational agents.`,
+        reasoning: multiAgentDecision.finalOperationalReasoning,
+        recommendedAction:
+          multiAgentDecision.recommendedActions[0] ?? "Continue monitoring with existing safety guardrails.",
+        confidence: multiAgentDecision.confidence,
+        meta: {
+          ...intelligenceMeta,
+          multiAgentOperationalBrain: multiAgentDiagnostics,
+        },
+      });
+      if (event.written) eventsWritten += 1;
+      if (event.duplicate) skippedDuplicates += 1;
+    }
+
     const baseCommunicationContext = buildDecisionContext({
       memory,
       order,
@@ -276,6 +371,7 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
       digitalTwin,
       policy: baseCommunicationContext.policy,
       waitlistAvailability,
+      customerMemory,
     });
     const communicationDiagnostics = {
       eligibleForCommunicationExecution: canExecuteCommunication,
@@ -293,6 +389,9 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
       slotUnrecoverable: communicationDecision.priorityDiagnostics.slotUnrecoverable,
       quietHoursSuppressed: communicationDecision.priorityDiagnostics.quietHoursSuppressed,
       quietHoursOverrideUsed: communicationDecision.priorityDiagnostics.quietHoursOverrideUsed,
+      reliabilityFactors: communicationDecision.priorityDiagnostics.reliabilityFactors,
+      memorySignalsUsed: communicationDecision.priorityDiagnostics.memorySignalsUsed,
+      orchestrationBiasesApplied: communicationDecision.priorityDiagnostics.orchestrationBiasesApplied,
       shouldPrepareMessage: communicationDecision.shouldPrepareMessage,
       suppressed: communicationDecision.suppressed,
       suppressionReasons: communicationDecision.suppressionReasons,
@@ -306,6 +405,7 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
       slotHoldExpiresAt: order.slotHoldExpiresAt ?? null,
       hasRecipient: Boolean(order.phone),
       providerStatus: getWhatsAppProviderStatus(),
+      multiAgentOperationalBrain: multiAgentDiagnostics,
     };
 
     if (canExecuteCommunication && communicationDecision.shouldPrepareMessage) {
@@ -388,6 +488,7 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
               providerStatus: execution.providerStatus,
             },
             communicationDiagnostics,
+            multiAgentOperationalBrain: multiAgentDiagnostics,
             deliveryAttempt: {
               channel: communicationDecision.channel,
               step: communicationDecision.step,
@@ -425,6 +526,7 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
           communicationClimate,
           communicationOutcome: "SUPPRESSED",
           communicationDiagnostics,
+          multiAgentOperationalBrain: multiAgentDiagnostics,
           communicationSuppression: {
             step: communicationDecision.step,
             attemptCount: communicationDecision.attemptCount,
