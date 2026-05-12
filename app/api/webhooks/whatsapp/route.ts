@@ -1,10 +1,16 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/app/lib/admin";
+import { evaluateAutonomousRecoveryActions } from "@/app/lib/autonomousRecoveryActionEngine";
 import {
   buildConversationalRecoveryResponse,
   type WhatsAppIntent,
 } from "@/app/lib/conversationalRecoveryEngine";
+import {
+  buildCustomerOperationalMemoryProfiles,
+  getCustomerOperationalMemoryForOrder,
+} from "@/app/lib/customerOperationalMemoryEngine";
 import { mapAndEnrichOrderFromDb, mapOrderToDb } from "@/app/lib/domain/orderMapper";
+import { evaluateWebhookReliability } from "@/app/lib/infrastructure/webhookReliabilityLayer";
 import { executeDirectCommunication } from "@/app/lib/providers/communication/communicationExecutionService";
 
 function getPayloadSummary(payload: Record<string, unknown>) {
@@ -193,6 +199,23 @@ async function findActiveOrderByPhone(from: unknown) {
   return { matchedOrder: matched ?? null, activeOrders };
 }
 
+async function getOrderAuditRows(orderId: string | null) {
+  if (!orderId) return [];
+
+  const { data, error } = await supabaseAdmin
+    .from("audit_logs")
+    .select("*")
+    .eq("order_id", orderId)
+    .order("created_at", { ascending: false })
+    .limit(100);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data ?? [];
+}
+
 function buildOrderNote({
   existingNotes,
   intent,
@@ -306,6 +329,7 @@ async function applySafeOrderUpdate({
 export async function POST(request: Request) {
   try {
     const contentType = request.headers.get("content-type") ?? "";
+    const rawBody = await request.clone().text().catch(() => "");
     const payload = contentType.includes("application/json")
       ? await request.json()
       : contentType.includes("form")
@@ -317,6 +341,46 @@ export async function POST(request: Request) {
     }
 
     const summary = getPayloadSummary(payload as Record<string, unknown>);
+    const webhookReliability = await evaluateWebhookReliability({
+      headers: request.headers,
+      provider: "whatsapp",
+      messageId: String(summary.messageId),
+      orderId: null,
+      rawBody,
+    });
+
+    if (!webhookReliability.accepted && (webhookReliability.malformed || !webhookReliability.signatureValidated)) {
+      await supabaseAdmin.from("audit_logs").insert({
+        action: "webhookRejected",
+        staff: "Valsentra Webhook Reliability",
+        order_id: "COMMUNICATION",
+        meta: {
+          operationalEvent: true,
+          category: "AUTONOMOUS_ACTION",
+          severity: webhookReliability.malformed ? "WARNING" : "CRITICAL",
+          title: "WhatsApp webhook rejected",
+          summary: webhookReliability.reason,
+          eventKey: webhookReliability.idempotencyKey,
+          idempotencyKey: webhookReliability.idempotencyKey,
+          webhookReliability,
+        },
+      });
+
+      return NextResponse.json(
+        { ok: false, rejected: true, webhookReliability },
+        { status: webhookReliability.status }
+      );
+    }
+
+    if (webhookReliability.replayDetected) {
+      return NextResponse.json({
+        ok: true,
+        replay: true,
+        recorded: false,
+        webhookReliability,
+      });
+    }
+
     const webhookType = summary.status ? "DELIVERY_STATUS" : "INBOUND_OR_REPLY";
     const body = typeof summary.body === "string" ? summary.body : "";
     const matchResult = webhookType === "INBOUND_OR_REPLY"
@@ -357,6 +421,28 @@ export async function POST(request: Request) {
             inboundMessage: body,
           })
         : null;
+    const orderAuditRows = await getOrderAuditRows(matchedOrderId);
+    const customerMemoryProfiles = buildCustomerOperationalMemoryProfiles({
+      orders: matchResult.activeOrders,
+      auditRows: orderAuditRows,
+    });
+    const customerMemory = matchedOrder
+      ? getCustomerOperationalMemoryForOrder({
+          order: matchedOrder,
+          profiles: customerMemoryProfiles,
+        })
+      : null;
+    const autonomousRecovery =
+      webhookType === "INBOUND_OR_REPLY"
+        ? evaluateAutonomousRecoveryActions({
+            order: matchedOrder,
+            intent: classification.intent,
+            inboundConfidence: classification.confidence,
+            recoveryResponse,
+            customerMemory,
+            auditRows: orderAuditRows,
+          })
+        : null;
     const replyExecution =
       matchedOrder && recoveryResponse?.shouldSendReply && recoveryResponse.generatedReply
         ? await executeDirectCommunication({
@@ -371,6 +457,7 @@ export async function POST(request: Request) {
               inboundIntent: classification.intent,
               recoveryActionType: recoveryResponse.recoveryActionType,
               conversationContext: recoveryResponse.conversationContext,
+              idempotencyKey: `whatsapp-recovery-reply:${String(summary.messageId)}:${matchedOrder.id}`,
             },
           })
         : null;
@@ -388,6 +475,28 @@ export async function POST(request: Request) {
               }),
               generatedReply: recoveryResponse.generatedReply,
             }),
+          })
+        )
+        .eq("id", matchedOrder.id);
+    }
+
+    if (matchedOrder && autonomousRecovery?.orderNote) {
+      const recoveryBaseNotes = appendConversationContextNote({
+        existingNotes: buildOrderNote({
+          existingNotes: matchedOrder.notes ?? "",
+          intent: classification.intent,
+          message: body,
+        }),
+        generatedReply: recoveryResponse?.generatedReply ?? null,
+      });
+
+      await supabaseAdmin
+        .from("orders")
+        .update(
+          mapOrderToDb({
+            notes: [recoveryBaseNotes, autonomousRecovery.orderNote]
+              .filter(Boolean)
+              .join(" | "),
           })
         )
         .eq("id", matchedOrder.id);
@@ -476,6 +585,47 @@ export async function POST(request: Request) {
       );
     }
 
+    if (matchedOrder && autonomousRecovery) {
+      await supabaseAdmin.from("audit_logs").insert(
+        autonomousRecovery.auditEvents.map((event) => ({
+          action: event.action,
+          staff: "Valsentra Autonomous Recovery",
+          order_id: matchedOrder.id,
+          meta: {
+            operationalEvent: true,
+            category: "RECOVERY",
+            severity: event.severity,
+            title: event.title,
+            summary: event.summary,
+            eventKey: `autonomous-recovery:${String(summary.messageId)}:${matchedOrder.id}:${event.eventKeySuffix}`,
+            confidence: event.actionDecision.confidence,
+            recommendedAction: event.actionDecision.recommendedStaffReview
+              ? "Staff review remains required before irreversible operational changes."
+              : "Continue monitoring the recovered state.",
+            reasoning: [
+              event.actionDecision.actionReason,
+              ...autonomousRecovery.diagnostics.recoveryConsensusSignals,
+            ],
+            autonomousRecoveryAction: event.actionDecision,
+            autonomousRecoveryDiagnostics: autonomousRecovery.diagnostics,
+            autonomousRecoveryExecuted: event.action === "autonomousRecoveryExecuted",
+            autonomousRecoveryBlocked: event.action === "autonomousRecoveryBlocked",
+            recoveryStateChanged: event.action === "recoveryStateChanged",
+            lateArrivalProtected: event.action === "lateArrivalProtected",
+            tentativeSlotReserved: event.action === "tentativeSlotReserved",
+            safetyScore: autonomousRecovery.diagnostics.safetyScore,
+            trustScore: autonomousRecovery.diagnostics.trustScore,
+            recoveryConfidence: autonomousRecovery.diagnostics.recoveryConfidence,
+            executionAllowed: autonomousRecovery.diagnostics.executionAllowed,
+            guardrailsApplied: autonomousRecovery.diagnostics.guardrailsApplied,
+            recoveryConsensusSignals: autonomousRecovery.diagnostics.recoveryConsensusSignals,
+            inboundIntent: classification.intent,
+            matchedOrderId,
+          },
+        }))
+      );
+    }
+
     // Provider-ready placeholder: accepts Twilio/Meta-style delivery or reply payloads,
     // but does not assume a specific provider contract until live integration is enabled.
     await supabaseAdmin.from("audit_logs").insert({
@@ -505,8 +655,10 @@ export async function POST(request: Request) {
           : "Continue monitoring.",
         confidence: classification.confidence,
         reasoning: [classification.reason],
-        eventKey: `whatsapp-inbound:${String(summary.messageId)}:${matchedOrderId ?? "unmatched"}`,
-        providerReady: true,
+            eventKey: `whatsapp-inbound:${String(summary.messageId)}:${matchedOrderId ?? "unmatched"}`,
+            idempotencyKey: webhookReliability.idempotencyKey,
+            webhookReliability,
+            providerReady: true,
         webhookType,
         messageId: summary.messageId,
         from: summary.from,
@@ -549,6 +701,7 @@ export async function POST(request: Request) {
           operationalDecision: recoveryResponse?.operationalDecision ?? null,
           slotAvailabilityChecked: recoveryResponse?.slotAvailabilityChecked ?? false,
           recoveryActionType: recoveryResponse?.recoveryActionType ?? null,
+          autonomousRecovery: autonomousRecovery?.diagnostics ?? null,
         },
         rawPayload: payload,
       },
@@ -570,6 +723,18 @@ export async function POST(request: Request) {
       recoveryActionType: recoveryResponse?.recoveryActionType ?? null,
       replySent: Boolean(replyExecution?.realMessageSent),
       replyProviderStatus: replyExecution?.status ?? null,
+      webhookReliability,
+      autonomousRecovery: autonomousRecovery
+        ? {
+            executionAllowed: autonomousRecovery.executionAllowed,
+            executedActions: autonomousRecovery.executedActions.map((action) => action.actionType),
+            blockedActions: autonomousRecovery.blockedActions.map((action) => ({
+              actionType: action.actionType,
+              blockedBy: action.blockedBy,
+            })),
+            diagnostics: autonomousRecovery.diagnostics,
+          }
+        : null,
     });
   } catch (error: any) {
     return NextResponse.json(

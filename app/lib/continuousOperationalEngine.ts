@@ -25,9 +25,15 @@ import {
 } from "@/app/lib/domain/orderMapper";
 import type { RestaurantOrder } from "@/app/lib/domain/restaurant";
 import { getEventKeySet, persistOperationalEvent } from "@/app/lib/intelligence/operationalEventModel";
+import { buildInfrastructureHealthSnapshot } from "@/app/lib/infrastructure/infrastructureHealthEngine";
+import { createOperationalQueueJob } from "@/app/lib/infrastructure/operationalQueueSystem";
 import { buildMultiLocationIntelligenceSnapshot } from "@/app/lib/intelligence/multiLocationIntelligenceEngine";
 import { buildOperationalDigitalTwin } from "@/app/lib/operationalDigitalTwinEngine";
-import { simulateOperationalDecision } from "@/app/lib/operationalSimulationEngine";
+import { buildOperationalKnowledgeGraph } from "@/app/lib/operationalKnowledgeGraphEngine";
+import {
+  simulateOperationalDecision,
+  simulateOperationalFuture,
+} from "@/app/lib/operationalSimulationEngine";
 import {
   createOperationalMemorySnapshot,
   getAdaptiveDecisionContext,
@@ -233,6 +239,41 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
     memory,
     digitalTwin,
   });
+  const operationalKnowledgeGraph = buildOperationalKnowledgeGraph({
+    orders,
+    auditRows: auditRaw ?? [],
+    waitlistAvailability,
+  });
+  const infrastructureQueueJobs = (auditRaw ?? [])
+    .filter((row) => {
+      const source = `${row.action ?? ""} ${JSON.stringify(row.meta ?? {})}`.toLowerCase();
+      return source.includes("communication") || source.includes("recovery") || source.includes("webhook");
+    })
+    .slice(0, 25)
+    .map((row) =>
+      createOperationalQueueJob({
+        queueName: "operational-recovery",
+        organizationId: row.meta?.organizationId ?? "org-default",
+        partitionKey: String(row.order_id ?? row.orderId ?? "system"),
+        priority:
+          row.meta?.severity === "CRITICAL"
+            ? "CRITICAL"
+            : row.meta?.severity === "WARNING"
+              ? "HIGH"
+              : "NORMAL",
+        idempotencyKey: String(row.meta?.idempotencyKey ?? row.meta?.eventKey ?? row.id),
+        attempt: Number(row.meta?.retryTracking?.retryAttempt ?? 0),
+        payloadSummary: {
+          action: row.action,
+          status: row.meta?.communicationExecution?.status ?? row.meta?.replyExecution?.status ?? "RECORDED",
+        },
+      })
+    );
+  const infrastructureHealth = buildInfrastructureHealthSnapshot({
+    auditRows: auditRaw ?? [],
+    queueJobs: infrastructureQueueJobs,
+    organizationId: orders[0]?.organizationId ?? "org-default",
+  });
   const bucket = hourBucket();
   const logs: string[] = [];
   let eventsWritten = 0;
@@ -256,6 +297,86 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
       order.paymentState === "BLOCKED" ||
       order.paymentState === "FAILED"
   );
+
+  if (!shouldSilent(mode)) {
+    const event = await writeOnce(eventKeys, {
+      eventKey: `infrastructure-health:${infrastructureHealth.providerHealth}:${bucket}`,
+      category: "LEARNING",
+      severity:
+        infrastructureHealth.infrastructureStabilityScore <= 45
+          ? "CRITICAL"
+          : infrastructureHealth.infrastructureStabilityScore <= 65
+            ? "WARNING"
+            : infrastructureHealth.infrastructureStabilityScore <= 82
+              ? "WATCH"
+              : "INFO",
+      action: "infrastructureHealthEvaluated",
+      orderId: "INFRASTRUCTURE",
+      title: "Infrastructure health evaluated",
+      summary: `Infrastructure stability is ${infrastructureHealth.infrastructureStabilityScore}/100 with provider health ${infrastructureHealth.providerHealth.toLowerCase()}.`,
+      reasoning:
+        infrastructureHealth.degradedSystems.length > 0
+          ? infrastructureHealth.degradedSystems
+          : ["Queue, provider, retry, and recovery infrastructure are inside normal operating range."],
+      recommendedAction: "Keep execution behind existing queue, idempotency, webhook, and orchestration guardrails.",
+      confidence: infrastructureHealth.infrastructureStabilityScore,
+      meta: {
+        infrastructureHealth,
+        queuePressure: infrastructureHealth.queuePressure,
+        providerLatency: infrastructureHealth.providerLatency,
+        failedExecutions: infrastructureHealth.failedExecutions,
+        retryStorms: infrastructureHealth.retryStorms,
+        communicationOutages: infrastructureHealth.communicationOutages,
+        recoveryBottlenecks: infrastructureHealth.recoveryBottlenecks,
+        operationalDegradation: infrastructureHealth.operationalDegradation,
+        infrastructureStabilityScore: infrastructureHealth.infrastructureStabilityScore,
+        providerHealth: infrastructureHealth.providerHealth,
+        degradedSystems: infrastructureHealth.degradedSystems,
+        retryActivity: infrastructureHealth.retryActivity,
+      },
+    });
+    if (event.written) eventsWritten += 1;
+    if (event.duplicate) skippedDuplicates += 1;
+  }
+
+  if (!shouldSilent(mode)) {
+    const event = await writeOnce(eventKeys, {
+      eventKey: `knowledge-graph:${operationalKnowledgeGraph.clusterType}:${bucket}`,
+      category: "LEARNING",
+      severity:
+        operationalKnowledgeGraph.operationalStability === "CRITICAL"
+          ? "CRITICAL"
+          : operationalKnowledgeGraph.operationalStability === "ELEVATED"
+            ? "WARNING"
+            : operationalKnowledgeGraph.operationalStability === "WATCH"
+              ? "WATCH"
+              : "INFO",
+      action: "operationalKnowledgeGraphGenerated",
+      orderId: operationalKnowledgeGraph.linkedOrders[0] ?? "OPERATIONAL_GRAPH",
+      title: "Operational knowledge graph generated",
+      summary: `${operationalKnowledgeGraph.clusterType.toLowerCase().replaceAll("_", " ")} detected across ${operationalKnowledgeGraph.linkedOrders.length} linked order${operationalKnowledgeGraph.linkedOrders.length === 1 ? "" : "s"}.`,
+      reasoning: operationalKnowledgeGraph.hotspotReasoning,
+      recommendedAction: "Use graph intelligence for visibility; execution remains behind orchestration guardrails.",
+      confidence: Math.max(60, operationalKnowledgeGraph.operationalPressureScore),
+      meta: {
+        operationalKnowledgeGraph,
+        operationalPressureScore: operationalKnowledgeGraph.operationalPressureScore,
+        collapsePropagationRisk: operationalKnowledgeGraph.collapsePropagationRisk,
+        serviceWaveRisk: operationalKnowledgeGraph.serviceWaveRisk,
+        congestionSeverity: operationalKnowledgeGraph.congestionSeverity,
+        clusterType: operationalKnowledgeGraph.clusterType,
+        linkedOrders: operationalKnowledgeGraph.linkedOrders,
+        dominantOperationalSignals: operationalKnowledgeGraph.dominantOperationalSignals,
+        systemicRevenueRisk: operationalKnowledgeGraph.systemicRevenueRisk,
+        operationalStability: operationalKnowledgeGraph.operationalStability,
+        chainReactionProbability: operationalKnowledgeGraph.chainReactionProbability,
+        hotspotReasoning: operationalKnowledgeGraph.hotspotReasoning,
+        graphSignalsUsed: operationalKnowledgeGraph.graphSignalsUsed,
+      },
+    });
+    if (event.written) eventsWritten += 1;
+    if (event.duplicate) skippedDuplicates += 1;
+  }
 
   if (!shouldSilent(mode) && criticalOrders.length > 0) {
     const event = await writeOnce(eventKeys, {
@@ -324,6 +445,13 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
       waitlistAvailability,
       customerMemory,
     });
+    const operationalSimulation = simulateOperationalFuture({
+      order,
+      activeOrders,
+      auditRows: orderAuditRows,
+      waitlistAvailability,
+      customerMemory,
+    });
     const multiAgentDiagnostics = {
       participatingAgents: multiAgentDecision.participatingAgents,
       fusionDecision: multiAgentDecision.fusionDecision,
@@ -357,6 +485,56 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
       if (event.duplicate) skippedDuplicates += 1;
     }
 
+    if (!shouldSilent(mode)) {
+      const trajectoryEvent =
+        operationalSimulation.interventionUrgency === "CRITICAL" ||
+        operationalSimulation.dominantRisk === "REVENUE_EXPOSURE"
+          ? "riskTrajectoryChanged"
+          : operationalSimulation.scenarios.some(
+                (scenario) =>
+                  scenario.scenario !== "No intervention" &&
+                  scenario.recoveryChance >= operationalSimulation.scenarios[0].recoveryChance + 12
+              )
+            ? "recoveryProjectionImproved"
+            : operationalSimulation.interventionUrgency === "HIGH"
+              ? "escalationForecastRaised"
+              : "simulationGenerated";
+      const event = await writeOnce(eventKeys, {
+        eventKey: `operational-simulation:${order.id}:${trajectoryEvent}:${bucket}`,
+        category: "AUTONOMOUS_ACTION",
+        severity:
+          operationalSimulation.interventionUrgency === "CRITICAL"
+            ? "CRITICAL"
+            : operationalSimulation.interventionUrgency === "HIGH"
+              ? "WARNING"
+              : operationalSimulation.interventionUrgency === "MEDIUM"
+                ? "WATCH"
+                : "INFO",
+        action: trajectoryEvent,
+        orderId: order.id,
+        title: "Operational simulation generated",
+        summary: operationalSimulation.predictedOutcome,
+        reasoning: operationalSimulation.likelyOperationalPath,
+        recommendedAction: operationalSimulation.recommendedIntervention,
+        confidence: operationalSimulation.confidence,
+        meta: {
+          ...intelligenceMeta,
+          operationalSimulation,
+          simulationConfidence: operationalSimulation.diagnostics.simulationConfidence,
+          simulationConsensus: operationalSimulation.diagnostics.simulationConsensus,
+          dominantSimulationFactors: operationalSimulation.diagnostics.dominantSimulationFactors,
+          projectionWindow: operationalSimulation.diagnostics.projectionWindow,
+          interventionComparison: operationalSimulation.diagnostics.interventionComparison,
+          simulationGenerated: true,
+          riskTrajectoryChanged: trajectoryEvent === "riskTrajectoryChanged",
+          recoveryProjectionImproved: trajectoryEvent === "recoveryProjectionImproved",
+          escalationForecastRaised: trajectoryEvent === "escalationForecastRaised",
+        },
+      });
+      if (event.written) eventsWritten += 1;
+      if (event.duplicate) skippedDuplicates += 1;
+    }
+
     const baseCommunicationContext = buildDecisionContext({
       memory,
       order,
@@ -373,6 +551,7 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
       waitlistAvailability,
       customerMemory,
     });
+    const latestAutonomousRecovery = orderAuditRows.find((row) => row.meta?.autonomousRecoveryDiagnostics);
     const communicationDiagnostics = {
       eligibleForCommunicationExecution: canExecuteCommunication,
       executionMode,
@@ -406,6 +585,29 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
       hasRecipient: Boolean(order.phone),
       providerStatus: getWhatsAppProviderStatus(),
       multiAgentOperationalBrain: multiAgentDiagnostics,
+      operationalSimulation,
+      operationalKnowledgeGraph: {
+        clusterType: operationalKnowledgeGraph.clusterType,
+        operationalPressureScore: operationalKnowledgeGraph.operationalPressureScore,
+        collapsePropagationRisk: operationalKnowledgeGraph.collapsePropagationRisk,
+        chainReactionProbability: operationalKnowledgeGraph.chainReactionProbability,
+        linkedOrders: operationalKnowledgeGraph.linkedOrders,
+      },
+      infrastructureHealth: {
+        infrastructureStabilityScore: infrastructureHealth.infrastructureStabilityScore,
+        queuePressure: infrastructureHealth.queuePressure,
+        providerHealth: infrastructureHealth.providerHealth,
+        failedExecutions: infrastructureHealth.failedExecutions,
+        retryActivity: infrastructureHealth.retryActivity,
+      },
+      latestAutonomousRecovery: latestAutonomousRecovery
+        ? {
+            action: latestAutonomousRecovery.action ?? null,
+            actionType: latestAutonomousRecovery.meta?.autonomousRecoveryAction?.actionType ?? null,
+            executionAllowed: latestAutonomousRecovery.meta?.autonomousRecoveryDiagnostics?.executionAllowed ?? null,
+            diagnostics: latestAutonomousRecovery.meta?.autonomousRecoveryDiagnostics ?? null,
+          }
+        : null,
     };
 
     if (canExecuteCommunication && communicationDecision.shouldPrepareMessage) {

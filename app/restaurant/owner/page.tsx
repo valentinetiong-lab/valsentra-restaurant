@@ -6,7 +6,20 @@ import AutopilotQueuePanel from "../../components/AutopilotQueuePanel";
 import { useAutopilotStore } from "../../store/autopilotStore";
 import type { RestaurantOrder as AutopilotOrder } from "../../types/autopilot";
 import IntelligenceDashboard from "@/app/components/IntelligenceDashboard";
+import AgentDecisionPanel, {
+  type MultiAgentOperationalBrain,
+} from "@/app/components/AgentDecisionPanel";
+import InfrastructureHealthPanel, {
+  type InfrastructureHealth,
+} from "@/app/components/InfrastructureHealthPanel";
 import OperationalBrainPanel from "@/app/components/OperationalBrainPanel";
+import OperationalKnowledgeGraphPanel, {
+  type OperationalKnowledgeGraph,
+} from "@/app/components/OperationalKnowledgeGraphPanel";
+import OperationalSimulationPanel, {
+  type OperationalSimulation,
+} from "@/app/components/OperationalSimulationPanel";
+import OperationalTimeline from "@/app/components/OperationalTimeline";
 import { calculateRevenueSnapshot } from "@/app/lib/revenueEngine";
 import {
   buildReliabilityProfileFromOrders,
@@ -95,6 +108,28 @@ type AuditItem = {
   action: string;
   staff: string;
   orderId: string;
+  meta?: {
+    multiAgentOperationalBrain?: MultiAgentOperationalBrain;
+    communicationDiagnostics?: {
+      multiAgentOperationalBrain?: MultiAgentOperationalBrain;
+    };
+    autonomousRecoveryAction?: {
+      actionType?: string;
+      operationalImpact?: string;
+      recommendedStaffReview?: boolean;
+      recoveryStateTransition?: {
+        to?: string;
+      };
+    };
+    autonomousRecoveryDiagnostics?: {
+      safetyScore?: number;
+      recoveryConfidence?: number;
+      executionAllowed?: boolean;
+    };
+    operationalSimulation?: OperationalSimulation;
+    operationalKnowledgeGraph?: OperationalKnowledgeGraph;
+    infrastructureHealth?: InfrastructureHealth;
+  };
   createdAt?: string;
 };
 
@@ -522,6 +557,35 @@ export default function RestaurantOwnerPage() {
 
     return { reminders, releases, recoveries, autopilotHandled };
   }, [autopilotFeed]);
+
+  const latestAgentDecision = useMemo(() => {
+    return (
+      audit
+        .map(
+          (item) =>
+            item.meta?.multiAgentOperationalBrain ??
+            item.meta?.communicationDiagnostics?.multiAgentOperationalBrain ??
+            null
+        )
+        .find(Boolean) ?? null
+    );
+  }, [audit]);
+
+  const latestAutonomousRecovery = useMemo(() => {
+    return audit.find((item) => item.meta?.autonomousRecoveryDiagnostics) ?? null;
+  }, [audit]);
+
+  const latestOperationalSimulation = useMemo(() => {
+    return audit.find((item) => item.meta?.operationalSimulation)?.meta?.operationalSimulation ?? null;
+  }, [audit]);
+
+  const latestOperationalKnowledgeGraph = useMemo(() => {
+    return audit.find((item) => item.meta?.operationalKnowledgeGraph)?.meta?.operationalKnowledgeGraph ?? null;
+  }, [audit]);
+
+  const latestInfrastructureHealth = useMemo(() => {
+    return audit.find((item) => item.meta?.infrastructureHealth)?.meta?.infrastructureHealth ?? null;
+  }, [audit]);
 
   const organizationSummary = useMemo(() => {
     const locations = new Set(
@@ -1040,6 +1104,44 @@ export default function RestaurantOwnerPage() {
 
           <div className={activeTab === "brain" ? "space-y-7" : "hidden"}>
             <OperationalBrainPanel />
+            <OperationalTimeline />
+            <InfrastructureHealthPanel health={latestInfrastructureHealth} emptyState />
+            <OperationalKnowledgeGraphPanel graph={latestOperationalKnowledgeGraph} emptyState />
+            <AgentDecisionPanel decision={latestAgentDecision} emptyState />
+            <OperationalSimulationPanel simulation={latestOperationalSimulation} emptyState />
+            {latestAutonomousRecovery ? (
+              <section className="rounded-[32px] border border-neutral-200/80 bg-white p-6 shadow-[0_18px_60px_rgba(15,23,42,0.05)] md:p-8">
+                <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
+                      Autonomous Recovery State
+                    </p>
+                    <h2 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-950">
+                      {latestAutonomousRecovery.meta?.autonomousRecoveryAction?.recoveryStateTransition?.to?.replaceAll("_", " ") ??
+                        latestAutonomousRecovery.meta?.autonomousRecoveryAction?.actionType?.replaceAll("_", " ") ??
+                        "Recovery monitored"}
+                    </h2>
+                    <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-600">
+                      {latestAutonomousRecovery.meta?.autonomousRecoveryAction?.operationalImpact ??
+                        "Valsentra recorded a safe autonomous recovery action from customer reply intelligence."}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2 md:justify-end">
+                    <span className="rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1.5 text-[11px] font-semibold text-emerald-700">
+                      Safety {latestAutonomousRecovery.meta?.autonomousRecoveryDiagnostics?.safetyScore ?? 0}/100
+                    </span>
+                    <span className="rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1.5 text-[11px] font-semibold text-emerald-700">
+                      Recovery {latestAutonomousRecovery.meta?.autonomousRecoveryDiagnostics?.recoveryConfidence ?? 0}/100
+                    </span>
+                    {latestAutonomousRecovery.meta?.autonomousRecoveryAction?.recommendedStaffReview ? (
+                      <span className="rounded-full border border-amber-100 bg-amber-50 px-3 py-1.5 text-[11px] font-semibold text-amber-700">
+                        Staff review protected
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              </section>
+            ) : null}
           </div>
 
           <div className={activeTab === "organization" ? "space-y-7" : "hidden"}>
@@ -1072,6 +1174,7 @@ export default function RestaurantOwnerPage() {
 
           <div className={activeTab === "timeline" ? "space-y-7" : "hidden"}>
             <IntelligenceTimeline />
+            <OperationalTimeline />
           </div>
 
           <div className={activeTab === "settings" ? "space-y-7" : "hidden"}>

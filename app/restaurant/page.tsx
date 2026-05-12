@@ -2,6 +2,13 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import AgentDecisionPanel, {
+  type MultiAgentOperationalBrain,
+} from "../components/AgentDecisionPanel";
+import OperationalSimulationPanel, {
+  type OperationalSimulation,
+} from "../components/OperationalSimulationPanel";
+import OperationalTimeline from "../components/OperationalTimeline";
 import { useAutopilotStore } from "../store/autopilotStore";
 import type { RestaurantOrder as AutopilotOrder } from "../types/autopilot";
 import { applyReliabilityEvent } from "../lib/reliabilityEngine";
@@ -102,6 +109,41 @@ type AutopilotFeedItem = {
   staff: string;
   orderId: string;
   timeLabel: string;
+  createdAt?: string;
+};
+
+type AuditItem = {
+  id: number | string;
+  action: string;
+  staff: string;
+  orderId: string;
+  meta?: {
+    multiAgentOperationalBrain?: MultiAgentOperationalBrain;
+    communicationDiagnostics?: {
+      multiAgentOperationalBrain?: MultiAgentOperationalBrain;
+    };
+    autonomousRecoveryAction?: {
+      actionType?: string;
+      actionReason?: string;
+      operationalImpact?: string;
+      confidence?: number;
+      recommendedStaffReview?: boolean;
+      recoveryStateTransition?: {
+        from?: string;
+        to?: string;
+        reason?: string;
+      };
+      blockedBy?: string[];
+    };
+    autonomousRecoveryDiagnostics?: {
+      safetyScore?: number;
+      trustScore?: number;
+      recoveryConfidence?: number;
+      executionAllowed?: boolean;
+      guardrailsApplied?: string[];
+    };
+    operationalSimulation?: OperationalSimulation;
+  };
   createdAt?: string;
 };
 
@@ -538,6 +580,7 @@ export default function RestaurantStaffPage() {
   const [orders, setOrders] = useState<RestaurantOrder[]>([]);
   const [settings, setSettings] = useState<RestaurantSettings | null>(null);
   const [waitlist, setWaitlist] = useState<WaitlistLead[]>([]);
+  const [audit, setAudit] = useState<AuditItem[]>([]);
   const [autopilotFeedItems, setAutopilotFeedItems] = useState<AutopilotFeedItem[]>([]);
   const [staffMembers, setStaffMembers] = useState<StaffMember[]>(DEFAULT_STAFF_MEMBERS);
   const [currentStaffId, setCurrentStaffId] = useState(DEFAULT_STAFF_MEMBERS[0].id);
@@ -642,6 +685,7 @@ export default function RestaurantStaffPage() {
           loadSettings(),
           loadWaitlist(),
           loadStaff(),
+          loadAudit(),
           loadAutopilotFeed(),
         ]);
       } finally {
@@ -668,6 +712,19 @@ export default function RestaurantStaffPage() {
     const res = await fetch("/api/waitlist", { cache: "no-store" });
     const data = await res.json();
     if (res.ok) setWaitlist(data);
+  }
+
+  async function loadAudit() {
+    try {
+      const res = await fetch("/api/audit", { cache: "no-store" });
+      const data = await res.json();
+
+      if (res.ok && Array.isArray(data)) {
+        setAudit(data);
+      }
+    } catch (error) {
+      console.warn("Audit log is not available yet.", error);
+    }
   }
 
   async function loadStaff() {
@@ -733,7 +790,7 @@ export default function RestaurantStaffPage() {
           : data.message || "Autopilot run complete"
       );
 
-      await Promise.all([loadOrders(), loadWaitlist(), loadAutopilotFeed()]);
+      await Promise.all([loadOrders(), loadWaitlist(), loadAudit(), loadAutopilotFeed()]);
     } finally {
       setSaving(false);
     }
@@ -1641,6 +1698,47 @@ export default function RestaurantStaffPage() {
     );
   }, [activeOrders, isBlocked]);
 
+  const agentDecisionByOrderId = useMemo(() => {
+    const map = new Map<string, MultiAgentOperationalBrain>();
+
+    for (const item of audit) {
+      const decision =
+        item.meta?.multiAgentOperationalBrain ??
+        item.meta?.communicationDiagnostics?.multiAgentOperationalBrain ??
+        null;
+
+      if (decision && item.orderId && !map.has(item.orderId)) {
+        map.set(item.orderId, decision);
+      }
+    }
+
+    return map;
+  }, [audit]);
+
+  const autonomousRecoveryByOrderId = useMemo(() => {
+    const map = new Map<string, NonNullable<AuditItem["meta"]>>();
+
+    for (const item of audit) {
+      if (item.orderId && item.meta?.autonomousRecoveryDiagnostics && !map.has(item.orderId)) {
+        map.set(item.orderId, item.meta);
+      }
+    }
+
+    return map;
+  }, [audit]);
+
+  const operationalSimulationByOrderId = useMemo(() => {
+    const map = new Map<string, OperationalSimulation>();
+
+    for (const item of audit) {
+      if (item.orderId && item.meta?.operationalSimulation && !map.has(item.orderId)) {
+        map.set(item.orderId, item.meta.operationalSimulation);
+      }
+    }
+
+    return map;
+  }, [audit]);
+
   const autopilotOrders = useMemo<AutopilotOrder[]>(() => {
     return orders.map((order) => ({
       id: order.id,
@@ -1941,6 +2039,7 @@ export default function RestaurantStaffPage() {
           </div>
 
           <div className={activeStaffTab === "autopilot" ? "space-y-6" : "hidden"}>
+          <OperationalTimeline compact initialEvents={audit} />
           <section className="rounded-[28px] border border-neutral-200 bg-white p-5 shadow-sm md:p-6">
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
@@ -2341,6 +2440,18 @@ export default function RestaurantStaffPage() {
                 const blocked = isBlocked(order);
                 const needsSetup = needsRecoveredSetup(order);
                 const staffGuidance = getStaffGuidance(order);
+                const agentDecision = agentDecisionByOrderId.get(order.id);
+                const autonomousRecovery = autonomousRecoveryByOrderId.get(order.id);
+                const operationalSimulation = operationalSimulationByOrderId.get(order.id);
+                const shouldShowAgentDecision =
+                  Boolean(agentDecision) &&
+                  (blocked ||
+                    order.status === "UNPAID" ||
+                    order.status === "PAYMENT_SENT" ||
+                    order.paymentState === "UNPAID" ||
+                    order.paymentState === "PENDING" ||
+                    order.collapseRiskTier === "CRITICAL" ||
+                    order.collapseRiskTier === "AT_RISK");
                 const reminderLink = buildWhatsAppLink(
                   order.phone,
                   `Hi ${order.customerName}, your order ${order.id} is currently ${order.status}. Please complete payment or reply if you need help.`
@@ -2469,6 +2580,52 @@ export default function RestaurantStaffPage() {
                             </ul>
                           </div>
                         )}
+
+                        {shouldShowAgentDecision ? (
+                          <div className="mt-4">
+                            <AgentDecisionPanel decision={agentDecision} compact />
+                          </div>
+                        ) : null}
+
+                        {operationalSimulation && shouldShowAgentDecision ? (
+                          <div className="mt-4">
+                            <OperationalSimulationPanel simulation={operationalSimulation} compact />
+                          </div>
+                        ) : null}
+
+                        {autonomousRecovery ? (
+                          <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                              <div>
+                                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">
+                                  Autonomous recovery state
+                                </p>
+                                <p className="mt-1 text-sm font-semibold text-emerald-950">
+                                  {autonomousRecovery.autonomousRecoveryAction?.recoveryStateTransition?.to?.replaceAll("_", " ") ??
+                                    autonomousRecovery.autonomousRecoveryAction?.actionType?.replaceAll("_", " ") ??
+                                    "Recovery monitored"}
+                                </p>
+                                <p className="mt-1 text-sm leading-6 text-emerald-800">
+                                  {autonomousRecovery.autonomousRecoveryAction?.operationalImpact ??
+                                    "Valsentra recorded a safe autonomous recovery signal for this order."}
+                                </p>
+                              </div>
+                              <div className="grid gap-2 text-xs md:w-[220px]">
+                                <span className="rounded-full border border-emerald-200 bg-white px-3 py-1.5 font-semibold text-emerald-700">
+                                  Safety {autonomousRecovery.autonomousRecoveryDiagnostics?.safetyScore ?? 0}/100
+                                </span>
+                                <span className="rounded-full border border-emerald-200 bg-white px-3 py-1.5 font-semibold text-emerald-700">
+                                  Recovery {autonomousRecovery.autonomousRecoveryDiagnostics?.recoveryConfidence ?? 0}/100
+                                </span>
+                                {autonomousRecovery.autonomousRecoveryAction?.recommendedStaffReview ? (
+                                  <span className="rounded-full border border-amber-200 bg-white px-3 py-1.5 font-semibold text-amber-700">
+                                    Staff review still required
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
 
                         <div className="mt-4 grid gap-2 text-sm text-neutral-700 md:grid-cols-2">
                           <p>

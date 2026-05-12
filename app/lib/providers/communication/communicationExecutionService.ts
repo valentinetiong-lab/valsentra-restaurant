@@ -1,4 +1,5 @@
 import type { RecoverySequenceDecision } from "@/app/lib/communicationOrchestrationEngine";
+import { checkIdempotencyKey } from "@/app/lib/infrastructure/idempotencyLayer";
 import { createInternalCommunicationProvider } from "@/app/lib/providers/communication/internalProvider";
 import {
   createWhatsAppProvider,
@@ -56,6 +57,25 @@ export async function executeRecoveryCommunication({
   customerName?: string;
   eventKey: string;
 }): Promise<CommunicationExecutionResult> {
+  const duplicate = await checkIdempotencyKey({
+    key: eventKey,
+    scope: "WHATSAPP_SEND",
+  });
+  if (duplicate.duplicate) {
+    return {
+      attempted: false,
+      provider: "idempotency-layer",
+      mode: "INTERNAL",
+      status: "SKIPPED",
+      ok: true,
+      error: duplicate.reason,
+      realMessageSent: false,
+      maskedRecipient: maskRecipient(decision.message.to),
+      attemptedAt: new Date().toISOString(),
+      providerStatus: getWhatsAppProviderStatus(),
+    };
+  }
+
   const input: CommunicationSendInput = {
     channel: decision.message.channel,
     to: decision.message.to,
@@ -96,6 +116,39 @@ export async function executeRecoveryCommunication({
 export async function executeDirectCommunication(
   input: CommunicationSendInput
 ): Promise<DirectCommunicationExecutionResult> {
+  const idempotencyKey =
+    typeof input.metadata?.idempotencyKey === "string"
+      ? input.metadata.idempotencyKey
+      : typeof input.metadata?.eventKey === "string"
+        ? input.metadata.eventKey
+        : null;
+
+  if (idempotencyKey) {
+    const duplicate = await checkIdempotencyKey({
+      key: idempotencyKey,
+      scope: "WHATSAPP_SEND",
+    });
+
+    if (duplicate.duplicate) {
+      return {
+        attempted: false,
+        provider: "idempotency-layer",
+        mode: "INTERNAL",
+        status: "SKIPPED",
+        ok: true,
+        error: duplicate.reason,
+        realMessageSent: false,
+        maskedRecipient: maskRecipient(input.to),
+        attemptedAt: new Date().toISOString(),
+        providerStatus: getWhatsAppProviderStatus(),
+        providerMetadata: {
+          idempotencyKey,
+          duplicateBlocked: true,
+        },
+      };
+    }
+  }
+
   const provider = selectProvider(input);
   const attemptedAt = new Date().toISOString();
   const result = await provider.send(input);

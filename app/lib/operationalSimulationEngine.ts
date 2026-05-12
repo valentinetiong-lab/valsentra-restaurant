@@ -1,4 +1,5 @@
 import type { AutonomousAction } from "@/app/lib/autonomousDecisionEngine";
+import type { CustomerOperationalMemoryProfile } from "@/app/lib/customerOperationalMemoryEngine";
 import type { RestaurantOrder } from "@/app/lib/domain/restaurant";
 import type { OperationalDigitalTwin } from "@/app/lib/operationalDigitalTwinEngine";
 import type { AdaptiveDecisionContext } from "@/app/lib/operationalMemoryEngine";
@@ -44,12 +45,118 @@ export type OperationalSimulationResult = {
   memoryInfluence: string[];
 };
 
+export type OperationalFutureScenarioName =
+  | "No intervention"
+  | "WhatsApp reminder sent"
+  | "Waitlist activated"
+  | "Staff escalation"
+  | "Tentative slot rescue";
+
+export type OperationalTimelineProjection = {
+  label: string;
+  minutesFromNow: number;
+  projectedState: string;
+  riskLevel: "LOW" | "WATCH" | "WARNING" | "CRITICAL";
+  explanation: string;
+};
+
+export type OperationalScenarioProjection = {
+  scenario: OperationalFutureScenarioName;
+  predictedOutcome: string;
+  recoveryChance: number;
+  estimatedRevenueLoss: number;
+  revenueProtectionImpact: number;
+  confidence: number;
+  riskTrajectory: "IMPROVING" | "STABLE" | "WORSENING";
+  interventionUrgency: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  explanation: string[];
+};
+
+export type OperationalFutureSimulation = {
+  orderId: string;
+  predictedOutcome: string;
+  confidence: number;
+  dominantRisk:
+    | "NO_SHOW"
+    | "PAYMENT_RECOVERY"
+    | "LATE_ARRIVAL"
+    | "SLOT_RECOVERY"
+    | "WAITLIST_REPLACEMENT"
+    | "CONGESTION"
+    | "REVENUE_EXPOSURE"
+    | "ESCALATION"
+    | "COMMUNICATION_FATIGUE"
+    | "STAFF_INTERVENTION";
+  likelyOperationalPath: string[];
+  simulatedRecoveryChance: number;
+  estimatedRevenueLoss: number;
+  recommendedIntervention: string;
+  interventionUrgency: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  timelineProjection: OperationalTimelineProjection[];
+  simulationFactorsUsed: string[];
+  scenarios: OperationalScenarioProjection[];
+  diagnostics: {
+    simulationConfidence: number;
+    simulationConsensus: string;
+    dominantSimulationFactors: string[];
+    projectionWindow: string;
+    interventionComparison: Array<{
+      scenario: OperationalFutureScenarioName;
+      recoveryChance: number;
+      estimatedRevenueLoss: number;
+      riskTrajectory: OperationalScenarioProjection["riskTrajectory"];
+    }>;
+  };
+};
+
 function clamp(value: number) {
   return Math.max(0, Math.min(Math.round(value), 100));
 }
 
 function isVerified(order: RestaurantOrder) {
   return order.status === "PAID" || order.paymentState === "VERIFIED" || Boolean(order.paymentVerified);
+}
+
+function minutesUntil(value?: string | null) {
+  if (!value) return null;
+  const diff = new Date(value).getTime() - Date.now();
+  if (!Number.isFinite(diff)) return null;
+  return Math.round(diff / 60000);
+}
+
+function countRecentRows(rows: Array<Record<string, any>>, patterns: string[], withinMinutes: number) {
+  const cutoff = Date.now() - withinMinutes * 60000;
+  return rows.filter((row) => {
+    const created = new Date(row.created_at ?? row.createdAt ?? "").getTime();
+    if (!Number.isFinite(created) || created < cutoff) return false;
+    const text = `${row.action ?? ""} ${JSON.stringify(row.meta ?? {})}`.toLowerCase();
+    return patterns.some((pattern) => text.includes(pattern));
+  }).length;
+}
+
+function countServiceWaveOrders(order: RestaurantOrder, activeOrders: RestaurantOrder[]) {
+  const target = new Date(order.reservationTime ?? "").getTime();
+  if (!Number.isFinite(target)) return 0;
+
+  return activeOrders.filter((candidate) => {
+    const time = new Date(candidate.reservationTime ?? "").getTime();
+    if (!Number.isFinite(time)) return false;
+    return Math.abs(time - target) <= 60 * 60000;
+  }).length;
+}
+
+function urgencyFromScore(score: number): OperationalFutureSimulation["interventionUrgency"] {
+  if (score >= 85) return "CRITICAL";
+  if (score >= 68) return "HIGH";
+  if (score >= 45) return "MEDIUM";
+  return "LOW";
+}
+
+function riskFromScore(score: number): OperationalTimelineProjection["riskLevel"] {
+  if (score >= 85) return "CRITICAL";
+  if (score >= 68) return "WARNING";
+  if (score >= 45) return "WATCH";
+  return "LOW";
 }
 
 function reversibility(action: SimulatedAction): SimulationPath["reversibility"] {
@@ -295,4 +402,266 @@ export function getSimulationPathForAction(
   action: SimulatedAction
 ) {
   return simulation?.paths.find((path) => path.action === action);
+}
+
+export function simulateOperationalFuture({
+  order,
+  activeOrders,
+  auditRows,
+  waitlistAvailability,
+  customerMemory,
+}: {
+  order: RestaurantOrder;
+  activeOrders: RestaurantOrder[];
+  auditRows: Array<Record<string, any>>;
+  waitlistAvailability: number;
+  customerMemory?: CustomerOperationalMemoryProfile | null;
+}): OperationalFutureSimulation {
+  const amount = Number(order.amount ?? 0);
+  const collapse = Number(order.collapseProbability ?? 0);
+  const minutesToReservation = minutesUntil(order.reservationTime);
+  const minutesToSlotExpiry = minutesUntil(order.slotHoldExpiresAt);
+  const paymentResolved = isVerified(order);
+  const fraudSignal = Boolean(order.terminalMismatch || order.paymentState === "BLOCKED" || order.paymentState === "FAILED");
+  const communicationAttempts = countRecentRows(auditRows, ["communication", "whatsapp", "reminder"], 240);
+  const inboundResponses = countRecentRows(auditRows, ["inbound whatsapp", "customer reply", "inbound_or_reply"], 240);
+  const recoveryEvents = countRecentRows(auditRows, ["recovery", "waitlist", "tentative"], 360);
+  const waveOrders = countServiceWaveOrders(order, activeOrders);
+  const trustScore =
+    customerMemory
+      ? clamp(
+          customerMemory.operationalReliability * 0.35 +
+            customerMemory.communicationTrust * 0.25 +
+            customerMemory.recoveryCooperationScore * 0.2 +
+            (100 - customerMemory.ghostRisk) * 0.2
+        )
+      : Number(order.reliabilityScore ?? 70);
+  const communicationFatigueRisk = clamp(communicationAttempts * 18 + (customerMemory?.communicationTrust ?? 60) * -0.12);
+  const congestionImpact = clamp(waveOrders * 12 + activeOrders.length * 3 + (minutesToReservation !== null && minutesToReservation <= 90 ? 14 : 0));
+  const noShowLikelihood = clamp(
+    collapse * 0.45 +
+      (customerMemory?.ghostRisk ?? 35) * 0.28 +
+      (100 - trustScore) * 0.22 +
+      (inboundResponses > 0 ? -18 : 0)
+  );
+  const paymentRecoveryProbability = paymentResolved
+    ? 96
+    : clamp(
+        34 +
+          trustScore * 0.22 +
+          (customerMemory?.paymentVerifiedCount ?? 0) * 4 +
+          (inboundResponses > 0 ? 14 : 0) -
+          collapse * 0.18 -
+          communicationFatigueRisk * 0.12
+      );
+  const lateArrivalImpact = clamp((customerMemory?.lateArrivalCount ?? 0) * 14 + (minutesToReservation !== null && minutesToReservation <= 45 ? 12 : 0));
+  const slotRecoveryProbability = clamp(
+    waitlistAvailability * 16 +
+      (customerMemory?.recoveryCooperationScore ?? 50) * 0.26 +
+      (minutesToSlotExpiry !== null && minutesToSlotExpiry > 20 ? 16 : -8) -
+      collapse * 0.12
+  );
+  const waitlistReplacementSuccess = clamp(waitlistAvailability * 22 + recoveryEvents * 6 - congestionImpact * 0.12);
+  const escalationLikelihood = clamp(collapse * 0.42 + (paymentResolved ? -20 : 14) + (fraudSignal ? 22 : 0));
+  const staffInterventionNecessity = clamp(
+    collapse * 0.28 +
+      congestionImpact * 0.24 +
+      communicationFatigueRisk * 0.2 +
+      (fraudSignal ? 30 : 0) +
+      (order.riskLevel === "HIGH" ? 16 : 0)
+  );
+  const revenueAtRiskProgression = paymentResolved ? 0 : clamp(collapse * 0.62 + congestionImpact * 0.18 + (minutesToReservation !== null && minutesToReservation <= 90 ? 12 : 0));
+
+  const factors = {
+    noShowLikelihood,
+    paymentRecoveryProbability,
+    lateArrivalImpact,
+    slotRecoveryProbability,
+    waitlistReplacementSuccess,
+    congestionImpact,
+    revenueAtRiskProgression,
+    escalationLikelihood,
+    communicationFatigueRisk,
+    staffInterventionNecessity,
+  };
+  const dominantRisk = Object.entries({
+    NO_SHOW: noShowLikelihood,
+    PAYMENT_RECOVERY: 100 - paymentRecoveryProbability,
+    LATE_ARRIVAL: lateArrivalImpact,
+    SLOT_RECOVERY: 100 - slotRecoveryProbability,
+    WAITLIST_REPLACEMENT: 100 - waitlistReplacementSuccess,
+    CONGESTION: congestionImpact,
+    REVENUE_EXPOSURE: revenueAtRiskProgression,
+    ESCALATION: escalationLikelihood,
+    COMMUNICATION_FATIGUE: communicationFatigueRisk,
+    STAFF_INTERVENTION: staffInterventionNecessity,
+  }).sort((a, b) => b[1] - a[1])[0][0] as OperationalFutureSimulation["dominantRisk"];
+
+  const scenarioBase = [
+    {
+      scenario: "No intervention" as const,
+      recoveryDelta: -16,
+      lossMultiplier: 0.86,
+      trustDelta: 6,
+      trajectory: "WORSENING" as const,
+    },
+    {
+      scenario: "WhatsApp reminder sent" as const,
+      recoveryDelta: communicationFatigueRisk >= 72 ? 4 : 15,
+      lossMultiplier: communicationFatigueRisk >= 72 ? 0.72 : 0.52,
+      trustDelta: communicationFatigueRisk >= 72 ? -8 : 4,
+      trajectory: communicationFatigueRisk >= 72 ? "STABLE" as const : "IMPROVING" as const,
+    },
+    {
+      scenario: "Waitlist activated" as const,
+      recoveryDelta: waitlistAvailability > 0 ? 22 : -8,
+      lossMultiplier: waitlistAvailability > 0 ? 0.38 : 0.8,
+      trustDelta: -6,
+      trajectory: waitlistAvailability > 0 ? "IMPROVING" as const : "WORSENING" as const,
+    },
+    {
+      scenario: "Staff escalation" as const,
+      recoveryDelta: 12,
+      lossMultiplier: 0.48,
+      trustDelta: 10,
+      trajectory: "IMPROVING" as const,
+    },
+    {
+      scenario: "Tentative slot rescue" as const,
+      recoveryDelta: slotRecoveryProbability >= 55 ? 18 : 4,
+      lossMultiplier: slotRecoveryProbability >= 55 ? 0.42 : 0.74,
+      trustDelta: 2,
+      trajectory: slotRecoveryProbability >= 55 ? "IMPROVING" as const : "STABLE" as const,
+    },
+  ];
+  const baseRecovery = clamp((paymentRecoveryProbability + slotRecoveryProbability + waitlistReplacementSuccess) / 3);
+  const scenarios = scenarioBase.map((scenario): OperationalScenarioProjection => {
+    const recoveryChance = clamp(baseRecovery + scenario.recoveryDelta + scenario.trustDelta * 0.25);
+    const estimatedRevenueLoss = paymentResolved
+      ? 0
+      : Math.round(amount * scenario.lossMultiplier * Math.max(0.18, (100 - recoveryChance) / 100));
+    return {
+      scenario: scenario.scenario,
+      predictedOutcome:
+        scenario.trajectory === "IMPROVING"
+          ? `${scenario.scenario} is projected to improve recovery posture.`
+          : scenario.trajectory === "WORSENING"
+            ? `${scenario.scenario} is projected to increase exposure.`
+            : `${scenario.scenario} keeps risk stable while the system watches.`,
+      recoveryChance,
+      estimatedRevenueLoss,
+      revenueProtectionImpact: Math.max(0, amount - estimatedRevenueLoss),
+      confidence: clamp(58 + trustScore * 0.16 + (scenario.scenario === "No intervention" ? 8 : 0) - communicationFatigueRisk * 0.08),
+      riskTrajectory: scenario.trajectory,
+      interventionUrgency: urgencyFromScore(revenueAtRiskProgression + (100 - recoveryChance) * 0.35),
+      explanation: [
+        `Base recovery chance is ${baseRecovery}%.`,
+        `Communication fatigue risk is ${communicationFatigueRisk}/100.`,
+        `Waitlist availability is ${waitlistAvailability}.`,
+        `Service wave pressure includes ${waveOrders} nearby order${waveOrders === 1 ? "" : "s"}.`,
+      ],
+    };
+  });
+  const bestScenario = [...scenarios].sort((a, b) => {
+    if (b.recoveryChance !== a.recoveryChance) return b.recoveryChance - a.recoveryChance;
+    return a.estimatedRevenueLoss - b.estimatedRevenueLoss;
+  })[0];
+  const noIntervention = scenarios.find((scenario) => scenario.scenario === "No intervention")!;
+  const estimatedRevenueLoss = noIntervention.estimatedRevenueLoss;
+  const interventionUrgency = urgencyFromScore(
+    Math.max(revenueAtRiskProgression, staffInterventionNecessity, escalationLikelihood)
+  );
+  const predictedOutcome =
+    dominantRisk === "REVENUE_EXPOSURE"
+      ? "Revenue exposure is projected to grow without intervention."
+      : dominantRisk === "COMMUNICATION_FATIGUE"
+        ? "Communication fatigue may reduce recovery effectiveness."
+        : dominantRisk === "STAFF_INTERVENTION"
+          ? "Staff intervention is likely required before safe recovery."
+          : dominantRisk === "NO_SHOW"
+            ? "No-show risk is the leading projected outcome."
+            : `${dominantRisk.replaceAll("_", " ").toLowerCase()} is the leading projected pressure.`;
+  const confidence = clamp(
+    scenarios.reduce((sum, scenario) => sum + scenario.confidence, 0) / scenarios.length +
+      (customerMemory ? 6 : 0) -
+      (fraudSignal ? 6 : 0)
+  );
+  const likelyOperationalPath = [
+    paymentResolved ? "Payment truth remains verified." : "Payment remains unresolved.",
+    inboundResponses > 0 ? "Customer has recently responded." : "Customer response remains unconfirmed.",
+    bestScenario.predictedOutcome,
+    staffInterventionNecessity >= 68
+      ? "Staff review is likely needed before operational state changes."
+      : "System can continue monitoring with reversible recovery recommendations.",
+  ];
+  const timelineProjection: OperationalTimelineProjection[] = [
+    {
+      label: "Now",
+      minutesFromNow: 0,
+      projectedState: paymentResolved ? "Protected monitoring" : "Unresolved payment exposure",
+      riskLevel: riskFromScore(revenueAtRiskProgression),
+      explanation: `Collapse probability is ${collapse}% and payment recovery probability is ${paymentRecoveryProbability}%.`,
+    },
+    {
+      label: "Next 30 minutes",
+      minutesFromNow: 30,
+      projectedState: communicationFatigueRisk >= 70 ? "Outreach fatigue risk" : "Recovery window active",
+      riskLevel: riskFromScore(Math.max(communicationFatigueRisk, collapse - 8)),
+      explanation: `Communication fatigue risk is ${communicationFatigueRisk}/100.`,
+    },
+    {
+      label: "Service approach",
+      minutesFromNow: Math.max(60, Math.min(minutesToReservation ?? 120, 120)),
+      projectedState: congestionImpact >= 68 ? "Congested service wave" : "Service wave manageable",
+      riskLevel: riskFromScore(Math.max(congestionImpact, noShowLikelihood)),
+      explanation: `${waveOrders} order${waveOrders === 1 ? "" : "s"} sit inside the same service wave.`,
+    },
+  ];
+  const simulationFactorsUsed = [
+    `Collapse probability ${collapse}%.`,
+    `Trust score ${trustScore}/100.`,
+    `Payment recovery probability ${paymentRecoveryProbability}%.`,
+    `Slot recovery probability ${slotRecoveryProbability}%.`,
+    `Waitlist replacement success ${waitlistReplacementSuccess}%.`,
+    `Communication fatigue risk ${communicationFatigueRisk}/100.`,
+    `Service wave pressure ${congestionImpact}/100.`,
+    ...(customerMemory?.memorySignalsUsed ?? ["Live order and audit signals."]),
+  ];
+  const dominantSimulationFactors = Object.entries(factors)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([key, value]) => `${key.replaceAll("_", " ")} ${Math.round(value)}/100`);
+
+  return {
+    orderId: order.id,
+    predictedOutcome,
+    confidence,
+    dominantRisk,
+    likelyOperationalPath,
+    simulatedRecoveryChance: bestScenario.recoveryChance,
+    estimatedRevenueLoss,
+    recommendedIntervention: bestScenario.scenario,
+    interventionUrgency,
+    timelineProjection,
+    simulationFactorsUsed,
+    scenarios,
+    diagnostics: {
+      simulationConfidence: confidence,
+      simulationConsensus:
+        bestScenario.recoveryChance >= noIntervention.recoveryChance + 12
+          ? `${bestScenario.scenario} materially improves recovery compared with no intervention.`
+          : "Simulation does not show a strong improvement over monitoring yet.",
+      dominantSimulationFactors,
+      projectionWindow:
+        minutesToReservation !== null
+          ? `Now to reservation in ${Math.max(0, minutesToReservation)} minutes`
+          : "Next operational service window",
+      interventionComparison: scenarios.map((scenario) => ({
+        scenario: scenario.scenario,
+        recoveryChance: scenario.recoveryChance,
+        estimatedRevenueLoss: scenario.estimatedRevenueLoss,
+        riskTrajectory: scenario.riskTrajectory,
+      })),
+    },
+  };
 }
