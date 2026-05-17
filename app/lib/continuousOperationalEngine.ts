@@ -26,6 +26,7 @@ import {
 import type { RestaurantOrder } from "@/app/lib/domain/restaurant";
 import { getEventKeySet, persistOperationalEvent } from "@/app/lib/intelligence/operationalEventModel";
 import { buildInfrastructureHealthSnapshot } from "@/app/lib/infrastructure/infrastructureHealthEngine";
+import { enqueueOperationalJob } from "@/app/lib/infrastructure/operationalJobEngine";
 import { createOperationalQueueJob } from "@/app/lib/infrastructure/operationalQueueSystem";
 import { buildMultiLocationIntelligenceSnapshot } from "@/app/lib/intelligence/multiLocationIntelligenceEngine";
 import { buildOperationalDigitalTwin } from "@/app/lib/operationalDigitalTwinEngine";
@@ -43,7 +44,7 @@ import { resolveOperationalPolicy } from "@/app/lib/policyEngine";
 import { executeRecoveryCommunication } from "@/app/lib/providers/communication/communicationExecutionService";
 import { getWhatsAppProviderStatus } from "@/app/lib/providers/communication/whatsappProvider";
 import { buildReliabilityProfileFromOrders } from "@/app/lib/reliabilityEngine";
-import { runWaitlistCascade } from "@/app/lib/waitlistCascadeService";
+import { isRecoverableSlot } from "@/app/lib/waitlistRecoveryAutopilotEngine";
 
 type ContinuousRunResult = {
   mode: AutopilotMode;
@@ -153,11 +154,11 @@ function buildDecisionContext({
   return { learningContext, policy, simulation };
 }
 
-async function getAutopilotMode(): Promise<AutopilotMode> {
+async function getAutopilotMode(organizationId = "org-valsentra"): Promise<AutopilotMode> {
   const { data, error } = await supabaseAdmin
     .from("restaurant_settings")
     .select("autopilot_mode")
-    .eq("id", 1)
+    .eq("organization_id", organizationId)
     .single();
 
   if (error) return "SEMI_AUTO";
@@ -182,6 +183,11 @@ async function writeOnce(
   }
 
   const result = await persistOperationalEvent(input);
+  if ("duplicate" in result && result.duplicate) {
+    eventKeys.add(input.eventKey);
+    return { written: false, duplicate: true, error: undefined };
+  }
+
   if (result.ok) {
     eventKeys.add(input.eventKey);
     return { written: true, duplicate: false, error: undefined };
@@ -190,26 +196,39 @@ async function writeOnce(
   return { written: false, duplicate: false, error: result.error };
 }
 
-export async function runContinuousOperationalPass(): Promise<ContinuousRunResult> {
+export async function runContinuousOperationalPass({
+  organizationId = "org-valsentra",
+}: {
+  organizationId?: string;
+} = {}): Promise<ContinuousRunResult> {
   const [
     { data: ordersRaw, error: ordersError },
     { data: auditRaw, error: auditError },
     { data: waitlistRaw, error: waitlistError },
   ] = await Promise.all([
-    supabaseAdmin.from("orders").select("*").order("created_at", { ascending: false }),
+    supabaseAdmin
+      .from("orders")
+      .select("*")
+      .eq("organization_id", organizationId)
+      .order("created_at", { ascending: false }),
     supabaseAdmin
       .from("audit_logs")
       .select("*")
+      .eq("organization_id", organizationId)
       .order("created_at", { ascending: false })
       .limit(500),
-    supabaseAdmin.from("waitlist_leads").select("id").limit(200),
+    supabaseAdmin
+      .from("waitlist_leads")
+      .select("id")
+      .eq("organization_id", organizationId)
+      .limit(200),
   ]);
 
   if (ordersError) throw new Error(ordersError.message);
   if (auditError) throw new Error(auditError.message);
   if (waitlistError) throw new Error(waitlistError.message);
 
-  const mode = await getAutopilotMode();
+  const mode = await getAutopilotMode(organizationId);
   const executionMode = resolveAutonomousExecutionMode(mode);
   const eventKeys = getEventKeySet(auditRaw ?? []);
   const orders = (ordersRaw ?? []).map(mapAndEnrichOrderFromDb);
@@ -633,7 +652,8 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
                 lastReminderSentAt: execution.attemptedAt,
               })
             )
-            .eq("id", order.id);
+            .eq("id", order.id)
+            .eq("organization_id", organizationId);
 
           if (reminderUpdateError) {
             logs.push(`${order.id}: last reminder timestamp update failed (${reminderUpdateError.message})`);
@@ -1039,7 +1059,8 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
           notes: releasedNotes,
         })
       )
-      .eq("id", order.id);
+      .eq("id", order.id)
+      .eq("organization_id", organizationId);
 
     if (updateError) {
       logs.push(`${order.id}: release failed (${updateError.message})`);
@@ -1114,41 +1135,94 @@ export async function runContinuousOperationalPass(): Promise<ContinuousRunResul
 
     if (waitlistDecision.shouldExecute && waitlistAvailability > 0) {
       recoveriesAttempted += 1;
-      const cascade = await runWaitlistCascade({
-        orderId: order.id,
-        staffName: "Valsentra Continuous Engine",
+      const queued = await enqueueOperationalJob({
+        organizationId,
+        locationId: order.locationId ?? null,
+        jobType: "waitlist_recovery_autopilot",
+        priority: "high",
+        idempotencyKey: `waitlist-recovery:${organizationId}:${order.id}:FIRST_CANDIDATE`,
+        payload: {
+          orderId: order.id,
+          stage: "FIRST_CANDIDATE",
+        },
+        actor: {
+          userId: "continuous-operational-engine",
+          role: "internal",
+          source: "continuous-engine",
+        },
       });
 
       const waitlistEvent = await writeOnce(eventKeys, {
-        eventKey: `waitlist-attempt:${order.id}:${cascade.ok ? "success" : "failed"}`,
+        eventKey: `waitlist-recovery-queued:${order.id}`,
         category: "WAITLIST",
-        severity: cascade.ok ? "INFO" : "WARNING",
-        action: cascade.ok
-          ? `Continuous engine recovered ${order.id} through waitlist.`
-          : `Continuous engine could not recover ${order.id} through waitlist.`,
+        severity: "INFO",
+        action: `Continuous engine queued waitlist recovery for ${order.id}.`,
         orderId: order.id,
-        title: cascade.ok ? "Waitlist recovery activated" : "Waitlist recovery failed",
-        summary: cascade.ok
-          ? `Recovered slot with ${cascade.lead?.customerName}.`
-          : cascade.error ?? "No suitable waitlist replacement was available.",
+        title: "Waitlist recovery queued",
+        summary: "Valsentra started the recovery sequence for this released slot.",
         reasoning: [
-          cascade.ok ? "Waitlist candidate was available." : "No suitable waitlist candidate matched.",
+          "The slot is recoverable and waitlist demand is available.",
           `Autopilot mode is ${mode}.`,
         ],
-        recommendedAction: cascade.ok
-          ? "Complete recovered order details before payment action."
-          : "Owner review required for unrecovered revenue.",
+        recommendedAction: "Recovery will offer the slot to the best waitlist candidate first.",
         confidence: waitlistDecision.automationConfidence,
         meta: {
           ...decisionToAuditMeta(waitlistDecision),
           originalOrderId: order.id,
-          cascade,
+          recoveryState: "OPEN_RECOVERY",
+          recoveryJobId: queued.job.id,
+          duplicateJob: queued.duplicate,
           recoverableRevenue: order.amount,
         },
       });
       if (waitlistEvent.written) eventsWritten += 1;
       if (waitlistEvent.duplicate) skippedDuplicates += 1;
     }
+  }
+
+  for (const order of orders.filter(isRecoverableSlot)) {
+    const hasChildRecovery = orders.some((candidate) => candidate.recoverySourceOrderId === order.id);
+    if (hasChildRecovery || order.recoveryState === "RECOVERED" || order.recoveryState === "FAILED_RECOVERY") {
+      continue;
+    }
+
+    const queued = await enqueueOperationalJob({
+      organizationId,
+      locationId: order.locationId ?? null,
+      jobType: "waitlist_recovery_autopilot",
+      priority: "high",
+      idempotencyKey: `waitlist-recovery:${organizationId}:${order.id}:FIRST_CANDIDATE`,
+      payload: {
+        orderId: order.id,
+        stage: "FIRST_CANDIDATE",
+      },
+      actor: {
+        userId: "continuous-operational-engine",
+        role: "internal",
+        source: "continuous-engine",
+      },
+    });
+
+    const recoveryEvent = await writeOnce(eventKeys, {
+      eventKey: `recoverable-slot-detected:${order.id}`,
+      category: "WAITLIST",
+      severity: "INFO",
+      action: `Recoverable slot detected for ${order.id}.`,
+      orderId: order.id,
+      title: "Recovering slot",
+      summary: "Valsentra detected a cancelled, no-show, blocked, or released slot and started waitlist recovery.",
+      reasoning: ["The order is closed, blocked, expired, or released.", "Recovery is handled by the durable worker."],
+      recommendedAction: "Monitor recovery state; staff only need to act when replacement details are required.",
+      confidence: 78,
+      meta: {
+        recoveryState: "OPEN_RECOVERY",
+        recoveryJobId: queued.job.id,
+        duplicateJob: queued.duplicate,
+        recoverableRevenue: order.amount,
+      },
+    });
+    if (recoveryEvent.written) eventsWritten += 1;
+    if (recoveryEvent.duplicate) skippedDuplicates += 1;
   }
 
   return {

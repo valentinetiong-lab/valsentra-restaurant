@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "../../lib/admin";
+import { requireRouteRole } from "@/app/lib/security/routeProtection";
 
 function mapLead(row: Record<string, any>) {
   return {
@@ -14,11 +15,19 @@ function mapLead(row: Record<string, any>) {
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const access = await requireRouteRole({
+    request,
+    route: "/api/waitlist",
+    allowedRoles: ["staff", "manager", "owner", "admin", "internal"],
+  });
+  if (!access.ok) return access.response;
+
   try {
     const { data, error } = await supabaseAdmin
       .from("waitlist_leads")
       .select("*")
+      .eq("organization_id", access.actor.organizationId)
       .order("created_at", { ascending: false });
 
     if (error) {

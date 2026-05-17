@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/app/lib/admin";
+import { requireRouteRole } from "@/app/lib/security/routeProtection";
 
 function formatAuditTime(value?: string | null) {
   if (!value) return "Not set";
@@ -109,11 +110,19 @@ function mapAuditToFeedItem(row: Record<string, any>) {
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const access = await requireRouteRole({
+    request,
+    route: "/api/autopilot/feed",
+    allowedRoles: ["staff", "manager", "owner", "admin", "internal"],
+  });
+  if (!access.ok) return access.response;
+
   try {
     const { data, error } = await supabaseAdmin
       .from("audit_logs")
       .select("*")
+      .eq("meta->>organizationId", access.actor.organizationId)
       .order("created_at", { ascending: false })
       .limit(50);
 

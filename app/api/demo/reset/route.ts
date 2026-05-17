@@ -1,21 +1,42 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "../../../lib/admin";
+import { requireDevelopmentOnly } from "@/app/lib/security/environment";
+import { blockWithSecurityAudit } from "@/app/lib/security/routeProtection";
 
 function futureDate(hoursFromNow: number) {
   return new Date(Date.now() + hoursFromNow * 60 * 60 * 1000).toISOString();
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  const guard = requireDevelopmentOnly("Demo reset route");
+  if (!guard.ok) {
+    return blockWithSecurityAudit({
+      guard,
+      request,
+      route: "/api/demo/reset",
+      action: "production_guard_violation",
+    });
+  }
+
   try {
     // Clear dependent/history data first
-    await supabaseAdmin.from("audit_logs").delete().not("id", "is", null);
+    await supabaseAdmin
+      .from("audit_logs")
+      .delete()
+      .eq("organization_id", "org-valsentra");
 
     // Then clear orders
-    await supabaseAdmin.from("orders").delete().not("id", "is", null);
+    await supabaseAdmin
+      .from("orders")
+      .delete()
+      .eq("organization_id", "org-valsentra");
 
     const demoOrders = [
       {
         id: "DEMO-001",
+        organization_id: "org-valsentra",
+        location_id: "loc-primary",
+        location_name: "Primary Location",
         customer_name: "John Tan",
         phone: "60123456789",
         order_type: "DINE_IN_RESERVATION",
@@ -40,6 +61,9 @@ export async function POST() {
       },
       {
         id: "DEMO-002",
+        organization_id: "org-valsentra",
+        location_id: "loc-primary",
+        location_name: "Primary Location",
         customer_name: "Sarah Lim",
         phone: "60111111111",
         order_type: "PREORDER_PICKUP",
@@ -64,6 +88,9 @@ export async function POST() {
       },
       {
         id: "DEMO-003",
+        organization_id: "org-valsentra",
+        location_id: "loc-primary",
+        location_name: "Primary Location",
         customer_name: "Ahmad",
         phone: "60122222222",
         order_type: "PREORDER_PICKUP",
@@ -98,7 +125,11 @@ export async function POST() {
       action: "Demo data reset",
       staff: "System",
       order_id: "DEMO",
+      organization_id: "org-valsentra",
+      location_id: "loc-primary",
       meta: {
+        organizationId: "org-valsentra",
+        locationId: "loc-primary",
         type: "demo",
       },
     });

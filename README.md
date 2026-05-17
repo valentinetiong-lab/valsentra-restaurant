@@ -24,6 +24,9 @@ API routes:
 - `/api/waitlist/cascade`
 - `/api/autopilot/feed`
 - `/api/operational/continuous`
+- `/api/operational/runtime`
+- `/api/operational/mesh`
+- `/api/operational/live-sync`
 - `/api/intelligence/brain`
 - `/api/intelligence/timeline`
 - `/api/intelligence/organization`
@@ -132,6 +135,46 @@ Run checks:
 npm run lint
 npm run build
 ```
+
+## External Operational Worker
+
+Valsentra can run operational jobs outside normal dashboard traffic through a server-side worker process.
+
+Required worker environment:
+
+```env
+WORKER_ORGANIZATION_SCOPE=your-organization-id
+WORKER_LOCATION_SCOPE=
+WORKER_ID=local-worker-1
+WORKER_POLL_INTERVAL_MS=15000
+WORKER_MAX_JOBS_PER_TICK=5
+WORKER_HEARTBEAT_INTERVAL_MS=10000
+```
+
+Run continuously:
+
+```bash
+npm run worker:dev
+```
+
+Run one safe processing tick:
+
+```bash
+npm run worker:once
+```
+
+Check runtime and mesh health without claiming jobs:
+
+```bash
+npm run worker:health
+```
+
+Worker safety boundaries:
+
+- The worker executes only through existing durable job and runtime engines.
+- It does not confirm payments, release blocked orders, refund, or cancel paid/high-risk reservations.
+- It respects existing retry, dead-letter, idempotency, provider, payment truth, and manager-review protections.
+- Worker heartbeat, mesh state, failover, and degradation are written through the operational command bus and timeline memory.
 
 ## Testing Autonomous WhatsApp Safely
 

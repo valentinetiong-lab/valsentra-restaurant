@@ -11,7 +11,18 @@ import {
 } from "@/app/lib/customerOperationalMemoryEngine";
 import { mapAndEnrichOrderFromDb, mapOrderToDb } from "@/app/lib/domain/orderMapper";
 import { evaluateWebhookReliability } from "@/app/lib/infrastructure/webhookReliabilityLayer";
+import { appendOperationalTimelineEvent } from "@/app/lib/operationalTimelineMemoryEngine";
 import { executeDirectCommunication } from "@/app/lib/providers/communication/communicationExecutionService";
+import {
+  extractWhatsAppWebhookSummary,
+  normalizeWhatsAppDeliveryState,
+  type WhatsAppDeliveryState,
+} from "@/app/lib/providers/communication/whatsappBusinessIntegration";
+import {
+  createTraceId,
+  enforceRateLimit,
+  getExecutionSource,
+} from "@/app/lib/security/routeProtection";
 
 function getPayloadSummary(payload: Record<string, unknown>) {
   const messageId =
@@ -25,6 +36,15 @@ function getPayloadSummary(payload: Record<string, unknown>) {
   const status = payload.MessageStatus ?? payload.SmsStatus ?? payload.status ?? null;
 
   return { messageId, from, body, status };
+}
+
+function timelineEventForWhatsAppDelivery(state: WhatsAppDeliveryState) {
+  if (state === "DELIVERED") return "WHATSAPP_MESSAGE_DELIVERED" as const;
+  if (state === "READ") return "WHATSAPP_MESSAGE_READ" as const;
+  if (state === "FAILED") return "WHATSAPP_SEND_FAILED" as const;
+  if (state === "RETRYING") return "WHATSAPP_RETRY_STARTED" as const;
+  if (state === "SUPPRESSED") return "WHATSAPP_SUPPRESSED" as const;
+  return "WHATSAPP_MESSAGE_SENT" as const;
 }
 
 function normalizePhone(value: unknown) {
@@ -286,7 +306,8 @@ async function applySafeOrderUpdate({
           paymentVerified: false,
         })
       )
-      .eq("id", order.id);
+      .eq("id", order.id)
+      .eq("organization_id", order.organizationId);
 
     return {
       actionTaken: "FLAGGED_PAYMENT_VERIFICATION_REQUIRED",
@@ -304,7 +325,8 @@ async function applySafeOrderUpdate({
     await supabaseAdmin
       .from("orders")
       .update(mapOrderToDb({ notes }))
-      .eq("id", order.id);
+      .eq("id", order.id)
+      .eq("organization_id", order.organizationId);
 
     return {
       actionTaken:
@@ -318,7 +340,8 @@ async function applySafeOrderUpdate({
   await supabaseAdmin
     .from("orders")
     .update(mapOrderToDb({ notes }))
-    .eq("id", order.id);
+    .eq("id", order.id)
+    .eq("organization_id", order.organizationId);
 
   return {
     actionTaken: "UNKNOWN_REPLY_FLAGGED_FOR_STAFF_REVIEW",
@@ -327,6 +350,18 @@ async function applySafeOrderUpdate({
 }
 
 export async function POST(request: Request) {
+  const rateLimit = await enforceRateLimit({
+    request,
+    route: "/api/webhooks/whatsapp",
+    scope: "whatsapp-webhook",
+    maxRequests: 120,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.ok) return rateLimit.response;
+
+  const traceId = createTraceId(request);
+  const executionSource = getExecutionSource(request);
+
   try {
     const contentType = request.headers.get("content-type") ?? "";
     const rawBody = await request.clone().text().catch(() => "");
@@ -340,13 +375,18 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid webhook payload." }, { status: 400 });
     }
 
-    const summary = getPayloadSummary(payload as Record<string, unknown>);
+    const summary = {
+      ...getPayloadSummary(payload as Record<string, unknown>),
+      ...extractWhatsAppWebhookSummary(payload as Record<string, unknown>),
+    };
     const webhookReliability = await evaluateWebhookReliability({
       headers: request.headers,
       provider: "whatsapp",
       messageId: String(summary.messageId),
       orderId: null,
       rawBody,
+      requestUrl: request.url,
+      params: payload as Record<string, unknown>,
     });
 
     if (!webhookReliability.accepted && (webhookReliability.malformed || !webhookReliability.signatureValidated)) {
@@ -354,6 +394,8 @@ export async function POST(request: Request) {
         action: "webhookRejected",
         staff: "Valsentra Webhook Reliability",
         order_id: "COMMUNICATION",
+        organization_id: "org-valsentra",
+        location_id: null,
         meta: {
           operationalEvent: true,
           category: "AUTONOMOUS_ACTION",
@@ -362,6 +404,8 @@ export async function POST(request: Request) {
           summary: webhookReliability.reason,
           eventKey: webhookReliability.idempotencyKey,
           idempotencyKey: webhookReliability.idempotencyKey,
+          traceId,
+          executionSource,
           webhookReliability,
         },
       });
@@ -381,6 +425,7 @@ export async function POST(request: Request) {
       });
     }
 
+    const deliveryState = normalizeWhatsAppDeliveryState(summary.status);
     const webhookType = summary.status ? "DELIVERY_STATUS" : "INBOUND_OR_REPLY";
     const body = typeof summary.body === "string" ? summary.body : "";
     const matchResult = webhookType === "INBOUND_OR_REPLY"
@@ -457,8 +502,10 @@ export async function POST(request: Request) {
               inboundIntent: classification.intent,
               recoveryActionType: recoveryResponse.recoveryActionType,
               conversationContext: recoveryResponse.conversationContext,
-              idempotencyKey: `whatsapp-recovery-reply:${String(summary.messageId)}:${matchedOrder.id}`,
-            },
+            idempotencyKey: `whatsapp-recovery-reply:${String(summary.messageId)}:${matchedOrder.id}`,
+            traceId,
+            executionSource,
+          },
           })
         : null;
 
@@ -477,7 +524,8 @@ export async function POST(request: Request) {
             }),
           })
         )
-        .eq("id", matchedOrder.id);
+        .eq("id", matchedOrder.id)
+        .eq("organization_id", matchedOrder.organizationId);
     }
 
     if (matchedOrder && autonomousRecovery?.orderNote) {
@@ -499,7 +547,8 @@ export async function POST(request: Request) {
               .join(" | "),
           })
         )
-        .eq("id", matchedOrder.id);
+        .eq("id", matchedOrder.id)
+        .eq("organization_id", matchedOrder.organizationId);
     }
 
     if (matchedOrder && recoveryResponse) {
@@ -543,6 +592,8 @@ export async function POST(request: Request) {
           action: row.action,
           staff: "Valsentra Conversational Recovery",
           order_id: matchedOrder.id,
+          organization_id: matchedOrder.organizationId,
+          location_id: matchedOrder.locationId,
           meta: {
             operationalEvent: true,
             category: "RECOVERY",
@@ -591,6 +642,8 @@ export async function POST(request: Request) {
           action: event.action,
           staff: "Valsentra Autonomous Recovery",
           order_id: matchedOrder.id,
+          organization_id: matchedOrder.organizationId,
+          location_id: matchedOrder.locationId,
           meta: {
             operationalEvent: true,
             category: "RECOVERY",
@@ -626,85 +679,129 @@ export async function POST(request: Request) {
       );
     }
 
-    // Provider-ready placeholder: accepts Twilio/Meta-style delivery or reply payloads,
-    // but does not assume a specific provider contract until live integration is enabled.
-    await supabaseAdmin.from("audit_logs").insert({
-      action:
+    const finalAuditAction =
+      webhookType === "INBOUND_OR_REPLY"
+        ? `Inbound WhatsApp reply classified as ${classification.intent}`
+        : `WhatsApp delivery ${deliveryState.toLowerCase()}`;
+    const finalOrganizationId = matchedOrder?.organizationId ?? "org-valsentra";
+    const finalLocationId = matchedOrder?.locationId ?? null;
+    const finalAuditMeta = {
+      operationalEvent: true,
+      category: webhookType === "INBOUND_OR_REPLY" ? "RECOVERY" : "AUTONOMOUS_ACTION",
+      severity:
+        webhookType === "DELIVERY_STATUS" && deliveryState === "FAILED"
+          ? "WARNING"
+          : classification.requiresHumanReview || !matchedOrderId
+            ? "WATCH"
+            : "INFO",
+      title:
         webhookType === "INBOUND_OR_REPLY"
-          ? `Inbound WhatsApp reply classified as ${classification.intent}`
-          : "WhatsApp webhook received",
-      staff: "Valsentra Communication Webhook",
-      order_id: matchedOrderId ?? "COMMUNICATION",
-      meta: {
-        operationalEvent: true,
-        category: webhookType === "INBOUND_OR_REPLY" ? "RECOVERY" : "AUTONOMOUS_ACTION",
-        severity:
-          classification.requiresHumanReview || !matchedOrderId ? "WATCH" : "INFO",
-        title:
-          webhookType === "INBOUND_OR_REPLY"
-            ? "Customer WhatsApp reply received"
-            : "WhatsApp webhook captured",
-        summary:
-          webhookType === "INBOUND_OR_REPLY"
-            ? matchedOrderId
-              ? `Customer reply matched ${matchedOrderId} and was classified as ${classification.intent}.`
-              : `Customer reply could not be matched to an active order.`
-            : `Webhook payload received for message ${String(summary.messageId)}.`,
-        recommendedAction: safeUpdate.requiresHumanReview
-          ? "Staff should review the customer reply before changing operational state."
+          ? "Customer WhatsApp reply received"
+          : `WhatsApp message ${deliveryState.toLowerCase()}`,
+      summary:
+        webhookType === "INBOUND_OR_REPLY"
+          ? matchedOrderId
+            ? `Customer reply matched ${matchedOrderId} and was classified as ${classification.intent}.`
+            : `Customer reply could not be matched to an active order.`
+          : `WhatsApp message ${String(summary.messageId)} is ${deliveryState.toLowerCase()}.`,
+      recommendedAction: safeUpdate.requiresHumanReview
+        ? "Staff should review the customer reply before changing operational state."
+        : deliveryState === "FAILED"
+          ? "Valsentra will retry safely when the message is retryable."
           : "Continue monitoring.",
-        confidence: classification.confidence,
-        reasoning: [classification.reason],
-            eventKey: `whatsapp-inbound:${String(summary.messageId)}:${matchedOrderId ?? "unmatched"}`,
-            idempotencyKey: webhookReliability.idempotencyKey,
-            webhookReliability,
-            providerReady: true,
-        webhookType,
-        messageId: summary.messageId,
-        from: summary.from,
-        body: summary.body,
-        status: summary.status,
-        inboundIntent: classification.intent,
-        intent: classification.intent,
+      confidence: classification.confidence,
+      reasoning: [classification.reason],
+      eventKey: `whatsapp-inbound:${String(summary.messageId)}:${matchedOrderId ?? "unmatched"}:${deliveryState}`,
+      idempotencyKey: webhookReliability.idempotencyKey,
+      webhookReliability,
+      providerReady: true,
+      traceId,
+      executionSource,
+      webhookType,
+      provider: "twilio-whatsapp",
+      providerMessageId: summary.messageId,
+      parentMessageId: summary.parentMessageId ?? null,
+      deliveryState,
+      retryState:
+        deliveryState === "FAILED" && webhookReliability.retryTracking.safeToRetry
+          ? "RETRYABLE"
+          : deliveryState === "RETRYING"
+            ? "RETRYING"
+            : "NONE",
+      messageId: summary.messageId,
+      from: summary.from,
+      to: summary.to ?? null,
+      body: summary.body,
+      status: summary.status,
+      errorCode: summary.errorCode ?? null,
+      errorMessage: summary.errorMessage ?? null,
+      inboundIntent: classification.intent,
+      intent: classification.intent,
+      matchedOrderId,
+      actionTaken: safeUpdate.actionTaken,
+      requiresHumanReview: safeUpdate.requiresHumanReview,
+      generatedReply: recoveryResponse?.generatedReply ?? null,
+      operationalDecision: recoveryResponse?.operationalDecision ?? null,
+      slotAvailabilityChecked: recoveryResponse?.slotAvailabilityChecked ?? false,
+      recoveryActionType: recoveryResponse?.recoveryActionType ?? null,
+      conversationContext: recoveryResponse?.conversationContext ?? null,
+      replyExecution: replyExecution
+        ? {
+            attempted: replyExecution.attempted,
+            provider: replyExecution.provider,
+            providerMode: replyExecution.mode,
+            status: replyExecution.status,
+            ok: replyExecution.ok,
+            messageId: replyExecution.messageId ?? null,
+            error: replyExecution.error ?? null,
+            realMessageSent: replyExecution.realMessageSent,
+            maskedRecipient: replyExecution.maskedRecipient,
+            attemptedAt: replyExecution.attemptedAt,
+            providerStatus: replyExecution.providerStatus,
+          }
+        : null,
+      diagnostics: {
         matchedOrderId,
+        intent: classification.intent,
+        confidence: classification.confidence,
         actionTaken: safeUpdate.actionTaken,
         requiresHumanReview: safeUpdate.requiresHumanReview,
+        normalizedFrom: normalizePhone(summary.from),
+        orderMatched: Boolean(matchedOrderId),
         generatedReply: recoveryResponse?.generatedReply ?? null,
         operationalDecision: recoveryResponse?.operationalDecision ?? null,
         slotAvailabilityChecked: recoveryResponse?.slotAvailabilityChecked ?? false,
         recoveryActionType: recoveryResponse?.recoveryActionType ?? null,
-        conversationContext: recoveryResponse?.conversationContext ?? null,
-        replyExecution: replyExecution
-          ? {
-              attempted: replyExecution.attempted,
-              provider: replyExecution.provider,
-              providerMode: replyExecution.mode,
-              status: replyExecution.status,
-              ok: replyExecution.ok,
-              messageId: replyExecution.messageId ?? null,
-              error: replyExecution.error ?? null,
-              realMessageSent: replyExecution.realMessageSent,
-              maskedRecipient: replyExecution.maskedRecipient,
-              attemptedAt: replyExecution.attemptedAt,
-              providerStatus: replyExecution.providerStatus,
-            }
-          : null,
-        diagnostics: {
-          matchedOrderId,
-          intent: classification.intent,
-          confidence: classification.confidence,
-          actionTaken: safeUpdate.actionTaken,
-          requiresHumanReview: safeUpdate.requiresHumanReview,
-          normalizedFrom: normalizePhone(summary.from),
-          orderMatched: Boolean(matchedOrderId),
-          generatedReply: recoveryResponse?.generatedReply ?? null,
-          operationalDecision: recoveryResponse?.operationalDecision ?? null,
-          slotAvailabilityChecked: recoveryResponse?.slotAvailabilityChecked ?? false,
-          recoveryActionType: recoveryResponse?.recoveryActionType ?? null,
-          autonomousRecovery: autonomousRecovery?.diagnostics ?? null,
-        },
-        rawPayload: payload,
+        autonomousRecovery: autonomousRecovery?.diagnostics ?? null,
       },
+      rawPayload: payload,
+    };
+
+    await supabaseAdmin.from("audit_logs").insert({
+      action: finalAuditAction,
+      staff: "Valsentra Communication Webhook",
+      order_id: matchedOrderId ?? "COMMUNICATION",
+      organization_id: finalOrganizationId,
+      location_id: finalLocationId,
+      meta: finalAuditMeta,
+    });
+
+    await appendOperationalTimelineEvent({
+      organizationId: finalOrganizationId,
+      locationId: finalLocationId,
+      orderId: matchedOrderId ?? "COMMUNICATION",
+      actorSource: "WhatsApp Business Webhook",
+      eventType:
+        webhookType === "INBOUND_OR_REPLY"
+          ? "CUSTOMER_REPLY_RECEIVED"
+          : timelineEventForWhatsAppDelivery(deliveryState),
+      summary: String(finalAuditMeta.summary),
+      severity: finalAuditMeta.severity as "INFO" | "WATCH" | "WARNING" | "CRITICAL",
+      category: "COMMUNICATION",
+      traceId,
+      correlationId: webhookReliability.idempotencyKey,
+      idempotencyKey: `timeline:${webhookReliability.idempotencyKey}:${deliveryState}`,
+      metadata: finalAuditMeta,
     });
 
     return NextResponse.json({
@@ -724,6 +821,8 @@ export async function POST(request: Request) {
       replySent: Boolean(replyExecution?.realMessageSent),
       replyProviderStatus: replyExecution?.status ?? null,
       webhookReliability,
+      traceId,
+      executionSource,
       autonomousRecovery: autonomousRecovery
         ? {
             executionAllowed: autonomousRecovery.executionAllowed,

@@ -2,7 +2,14 @@ import type {
   CommunicationProvider,
   CommunicationProviderResult,
   CommunicationSendInput,
+  ProviderStatus,
 } from "@/app/lib/providers/communication/communicationProviderTypes";
+import {
+  inferWhatsAppTemplateType,
+  normalizeWhatsAppDeliveryState,
+  normalizeWhatsAppRecipient,
+  toWhatsAppAddress,
+} from "@/app/lib/providers/communication/whatsappBusinessIntegration";
 
 type TwilioConfig = {
   accountSid: string;
@@ -23,33 +30,27 @@ function getTwilioConfig(): TwilioConfig | null {
   return { accountSid, authToken, from };
 }
 
-export function getWhatsAppProviderStatus() {
+export function getWhatsAppProviderStatus(): ProviderStatus & {
+  communicationProvider: string;
+  hasAccountSid: boolean;
+  hasAuthToken: boolean;
+  hasFrom: boolean;
+} {
+  const configured = Boolean(getTwilioConfig());
   return {
     provider: "twilio-whatsapp",
-    configured: Boolean(getTwilioConfig()),
+    channel: "WHATSAPP",
+    status: configured ? "READY" : "NOT_CONFIGURED",
+    configured,
+    liveSendingEnabled: configured,
+    reason: configured
+      ? "Twilio WhatsApp is configured for live provider sends."
+      : "WhatsApp is provider-ready but live sending is disabled until Twilio env vars are configured.",
     communicationProvider: process.env.COMMUNICATION_PROVIDER ?? "internal",
     hasAccountSid: Boolean(process.env.TWILIO_ACCOUNT_SID),
     hasAuthToken: Boolean(process.env.TWILIO_AUTH_TOKEN),
     hasFrom: Boolean(process.env.TWILIO_WHATSAPP_FROM),
   };
-}
-
-function normalizeWhatsAppRecipient(value: string) {
-  const trimmed = value.trim();
-  const withoutPrefix = trimmed.replace(/^whatsapp:/i, "");
-  const normalized = withoutPrefix.replace(/[^\d+]/g, "");
-
-  if (!normalized) return withoutPrefix;
-  if (normalized.startsWith("+")) return normalized;
-  if (normalized.startsWith("00")) return `+${normalized.slice(2)}`;
-  if (normalized.startsWith("60")) return `+${normalized}`;
-
-  return normalized;
-}
-
-function toWhatsAppAddress(value: string) {
-  const normalized = normalizeWhatsAppRecipient(value);
-  return normalized.startsWith("whatsapp:") ? normalized : `whatsapp:${normalized}`;
 }
 
 export function createWhatsAppProvider(): CommunicationProvider {
@@ -58,6 +59,7 @@ export function createWhatsAppProvider(): CommunicationProvider {
   return {
     name: "twilio-whatsapp",
     mode: config ? "LIVE" : "INTERNAL",
+    channel: "WHATSAPP",
     canSend(input: CommunicationSendInput) {
       return Boolean(config) && input.channel === "WHATSAPP";
     },
@@ -91,13 +93,16 @@ export function createWhatsAppProvider(): CommunicationProvider {
       // This adapter stays outside engines so orchestration logic cannot accidentally
       // send customer messages during local development.
       const endpoint = `https://api.twilio.com/2010-04-01/Accounts/${config.accountSid}/Messages.json`;
+      const normalizedRecipient = normalizeWhatsAppRecipient(input.to);
+      const templateType = inferWhatsAppTemplateType(input.metadata);
       const body = new URLSearchParams({
         From: toWhatsAppAddress(config.from),
-        To: toWhatsAppAddress(input.to),
+        To: toWhatsAppAddress(normalizedRecipient),
         Body: input.message,
       });
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15_000);
+      const started = Date.now();
 
       let response: Response;
       try {
@@ -122,6 +127,20 @@ export function createWhatsAppProvider(): CommunicationProvider {
             error?.name === "AbortError"
               ? "Twilio WhatsApp send timed out after 15 seconds."
               : error?.message ?? "Twilio WhatsApp send failed before receiving a response.",
+          degraded: true,
+          retryable: true,
+          latencyMs: Date.now() - started,
+          metadata: {
+            deliveryState: "FAILED",
+            retryState: "RETRYABLE",
+            templateType,
+            organizationId: input.metadata?.organizationId ?? null,
+            locationId: input.metadata?.locationId ?? null,
+            orderId: input.orderId ?? null,
+            executionId: input.metadata?.executionId ?? null,
+            correlationId: input.metadata?.correlationId ?? input.metadata?.idempotencyKey ?? null,
+            sentAt: null,
+          },
         };
       } finally {
         clearTimeout(timeout);
@@ -130,25 +149,54 @@ export function createWhatsAppProvider(): CommunicationProvider {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
+        const retryable = response.status >= 500 || response.status === 429;
         return {
           ok: false,
           provider: "twilio-whatsapp",
           mode: "LIVE",
-          status: "FAILED",
+          status: retryable ? "RETRYING" : "FAILED",
           error: data?.message ?? "Twilio WhatsApp send failed.",
-          metadata: { twilio: data },
+          degraded: retryable,
+          retryable,
+          latencyMs: Date.now() - started,
+          metadata: {
+            twilio: data,
+            deliveryState: retryable ? "RETRYING" : "FAILED",
+            retryState: retryable ? "RETRYABLE" : "EXHAUSTED",
+            templateType,
+            organizationId: input.metadata?.organizationId ?? null,
+            locationId: input.metadata?.locationId ?? null,
+            orderId: input.orderId ?? null,
+            executionId: input.metadata?.executionId ?? null,
+            correlationId: input.metadata?.correlationId ?? input.metadata?.idempotencyKey ?? null,
+            sentAt: null,
+          },
         };
       }
+
+      const deliveryState = normalizeWhatsAppDeliveryState(data?.status ?? "queued");
 
       return {
         ok: true,
         provider: "twilio-whatsapp",
         mode: "LIVE",
-        status: "SENT",
+        status: deliveryState === "QUEUED" ? "QUEUED" : "SENT",
         messageId: data?.sid,
+        latencyMs: Date.now() - started,
         metadata: {
           twilio: data,
           realMessageSent: true,
+          providerMessageId: data?.sid ?? null,
+          deliveryState,
+          retryState: "NONE",
+          templateType,
+          organizationId: input.metadata?.organizationId ?? null,
+          locationId: input.metadata?.locationId ?? null,
+          orderId: input.orderId ?? null,
+          executionId: input.metadata?.executionId ?? null,
+          correlationId: input.metadata?.correlationId ?? input.metadata?.idempotencyKey ?? null,
+          sentAt: new Date().toISOString(),
+          normalizedRecipient,
         },
       };
     },

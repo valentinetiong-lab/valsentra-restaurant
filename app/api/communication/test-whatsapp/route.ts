@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/app/lib/admin";
 import { createWhatsAppProvider } from "@/app/lib/providers/communication/whatsappProvider";
+import { requireDevelopmentOnly } from "@/app/lib/security/environment";
+import {
+  blockWithSecurityAudit,
+  enforceRateLimit,
+} from "@/app/lib/security/routeProtection";
 import type { CommunicationSendInput } from "@/app/lib/providers/communication/communicationProviderTypes";
 
 function cleanString(value: unknown) {
@@ -59,6 +64,8 @@ async function writeSandboxAudit(input: CommunicationSendInput, result: {
       : "Development WhatsApp sandbox test failed",
     staff: "Valsentra Communication Test",
     order_id: input.orderId ?? "WHATSAPP_SANDBOX_TEST",
+    organization_id: "org-valsentra",
+    location_id: "loc-primary",
     meta: {
       operationalEvent: true,
       category: "AUTONOMOUS_ACTION",
@@ -79,17 +86,33 @@ async function writeSandboxAudit(input: CommunicationSendInput, result: {
       orderId: input.orderId ?? null,
       customerName: input.customerName ?? null,
       sandboxTest: true,
+      organizationId: "org-valsentra",
+      locationId: "loc-primary",
       realMessageSent: result.ok && result.mode === "LIVE" && result.status === "SENT",
     },
   });
 }
 
 export async function POST(request: Request) {
-  if (process.env.NODE_ENV === "production") {
-    return NextResponse.json(
-      { ok: false, error: "WhatsApp sandbox test endpoint is disabled in production." },
-      { status: 403 }
-    );
+  const guard = requireDevelopmentOnly("WhatsApp sandbox test endpoint");
+  if (!guard.ok) {
+    return blockWithSecurityAudit({
+      guard,
+      request,
+      route: "/api/communication/test-whatsapp",
+      action: "production_guard_violation",
+    });
+  }
+
+  const rateLimit = await enforceRateLimit({
+    request,
+    route: "/api/communication/test-whatsapp",
+    scope: "test-whatsapp",
+    maxRequests: 5,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.ok) {
+    return rateLimit.response;
   }
 
   try {

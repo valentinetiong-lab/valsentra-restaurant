@@ -20,6 +20,8 @@ import {
 import { resolveOperationalPolicy } from "@/app/lib/policyEngine";
 import { executeRecoveryCommunication } from "@/app/lib/providers/communication/communicationExecutionService";
 import { getWhatsAppProviderStatus } from "@/app/lib/providers/communication/whatsappProvider";
+import { requireDevelopmentOnly } from "@/app/lib/security/environment";
+import { blockWithSecurityAudit } from "@/app/lib/security/routeProtection";
 
 export const dynamic = "force-dynamic";
 
@@ -154,6 +156,16 @@ async function getAutopilotMode(): Promise<AutopilotMode> {
 }
 
 export async function POST(request: Request) {
+  const guard = requireDevelopmentOnly("Development autonomous WhatsApp test route");
+  if (!guard.ok) {
+    return blockWithSecurityAudit({
+      guard,
+      request,
+      route: "/api/communication/test-autonomous",
+      action: "production_guard_violation",
+    });
+  }
+
   if (process.env.NODE_ENV === "production") {
     return jsonError(
       "Development autonomous test override is disabled in production.",

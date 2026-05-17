@@ -8,6 +8,12 @@ import AgentDecisionPanel, {
 import OperationalSimulationPanel, {
   type OperationalSimulation,
 } from "../components/OperationalSimulationPanel";
+import OperationalCapacityPanel from "../components/OperationalCapacityPanel";
+import LiveServiceCoordinationPanel from "../components/LiveServiceCoordinationPanel";
+import AutonomousOperationalExecutionPanel from "../components/AutonomousOperationalExecutionPanel";
+import OperationalCommandCenter from "../components/OperationalCommandCenter";
+import OperationalRuntimePanel from "../components/OperationalRuntimePanel";
+import OperationalWorkerMeshPanel from "../components/OperationalWorkerMeshPanel";
 import OperationalTimeline from "../components/OperationalTimeline";
 import { useAutopilotStore } from "../store/autopilotStore";
 import type { RestaurantOrder as AutopilotOrder } from "../types/autopilot";
@@ -22,10 +28,18 @@ import {
 import { findBestWaitlistLead } from "../lib/waitlistEngine";
 import type { PaymentState } from "../lib/paymentVerificationEngine";
 import {
-  sendPaymentLinkTransition,
   submitScreenshotTransition,
   verifyPaymentAmount,
 } from "../lib/paymentVerificationEngine";
+import {
+  canReleaseOrder,
+  type ReleaseGateDecision,
+} from "../lib/paymentTruthLayer";
+import type {
+  PaymentTruthSource,
+  PaymentTruthStatus,
+  RecoveryState,
+} from "../lib/domain/restaurant";
 
 type OrderStatus =
   | "UNPAID"
@@ -55,6 +69,19 @@ type RestaurantOrder = {
   paymentState?: PaymentState;
   paymentStage?: PaymentStage;
   paymentVerified?: boolean;
+  paymentIntentId?: string | null;
+  paymentProviderReference?: string | null;
+  paymentExpectedAmount?: number | null;
+  paymentPaidAmount?: number | null;
+  paymentCurrency?: string | null;
+  paymentTruthStatus?: PaymentTruthStatus | null;
+  paymentTruthSource?: PaymentTruthSource | string | null;
+  paymentProviderVerifiedAt?: string | null;
+  paymentMismatchReason?: string | null;
+  paymentProviderMetadata?: Record<string, unknown> | null;
+  paymentManagerOverrideBy?: string | null;
+  paymentManagerOverrideAt?: string | null;
+  paymentManagerOverrideReason?: string | null;
   depositRequired: boolean;
   depositAmount: number;
   depositPaid: boolean;
@@ -65,6 +92,12 @@ type RestaurantOrder = {
   riskLevel?: RiskLevel;
   protectionReason?: string;
   createdAt?: string;
+  recoveryState?: RecoveryState | null;
+  recoveryStartedAt?: string | null;
+  recoveryUpdatedAt?: string | null;
+  recoveryExpiresAt?: string | null;
+  recoveryAttemptCount?: number | null;
+  recoverySelectedLeadId?: string | number | null;
   recoverySourceOrderId?: string;
   awaitingDetails?: boolean;
 
@@ -143,6 +176,12 @@ type AuditItem = {
       guardrailsApplied?: string[];
     };
     operationalSimulation?: OperationalSimulation;
+    operationalEvent?: string;
+    inboundIntent?: string;
+    operationalLabel?: string;
+    actionTaken?: string;
+    requiresHumanReview?: boolean;
+    matchedContext?: string;
   };
   createdAt?: string;
 };
@@ -158,11 +197,11 @@ type ServiceSlot = {
 };
 
 const STAFF_TABS: Array<{ id: StaffTab; label: string; description: string }> = [
-  { id: "today", label: "Today", description: "Guidance, quick add, immediate work" },
+  { id: "today", label: "Today", description: "Urgent work, new bookings, immediate action" },
   { id: "orders", label: "Orders", description: "Active orders and staff actions" },
   { id: "recovery", label: "Recovery", description: "Waitlist fills and recovered orders" },
-  { id: "payment", label: "Payment Truth", description: "Unverified, blocked, and fraud signals" },
-  { id: "autopilot", label: "Autopilot", description: "What Valsentra handled" },
+  { id: "payment", label: "Payments", description: "Unpaid, checking, paid, and blocked orders" },
+  { id: "autopilot", label: "System Actions", description: "What Valsentra handled" },
 ];
 
 const DEFAULT_STAFF_MEMBERS: StaffMember[] = [
@@ -172,6 +211,7 @@ const DEFAULT_STAFF_MEMBERS: StaffMember[] = [
 ];
 
 const STAFF_STORAGE_KEY = "valsentra_current_staff_id";
+const RUSH_MODE_STORAGE_KEY = "valsentra_rush_mode";
 const SHOW_DEV_ORDER_ID_OVERRIDE = process.env.NODE_ENV !== "production";
 
 const SERVICE_DATE_PRESETS: Array<{ id: ServiceDatePreset; label: string }> = [
@@ -533,6 +573,75 @@ function getSafeOrderDateTime(value?: string | null) {
   });
 }
 
+function getMinutesUntilReservation(order: RestaurantOrder) {
+  if (!order.reservationTime) return null;
+
+  const reservation = new Date(order.reservationTime);
+  if (Number.isNaN(reservation.getTime())) return null;
+
+  return Math.round((reservation.getTime() - Date.now()) / 60_000);
+}
+
+function isArrivingSoon(order: RestaurantOrder) {
+  const minutes = getMinutesUntilReservation(order);
+  return minutes !== null && minutes >= -30 && minutes <= 90;
+}
+
+function getRushActionLabel(order: RestaurantOrder) {
+  if (needsRecoveredSetup(order)) return "Finish setup";
+  if (order.paymentState === "BLOCKED" || order.paymentState === "FAILED" || order.terminalMismatch) {
+    return "Do not release";
+  }
+  if (order.paymentState === "PENDING" || order.status === "PAYMENT_SENT") return "Check payment";
+  if (order.paymentState === "UNPAID" || order.status === "UNPAID") return "Get payment";
+  if (isArrivingSoon(order)) return "Prepare arrival";
+  return "Review";
+}
+
+function getStaffPaymentTruthLabel(order: RestaurantOrder) {
+  if (order.paymentTruthStatus === "PROVIDER_CONFIRMED") return "Payment confirmed";
+  if (order.paymentTruthStatus === "AMOUNT_MISMATCH") return "Amount mismatch";
+  if (order.paymentTruthStatus === "SCREENSHOT_ONLY") return "Customer Sent Proof";
+  if (order.paymentTruthStatus === "MANAGER_OVERRIDE") return "Manager approved";
+  if (order.paymentTruthStatus === "PENDING_PROVIDER" && order.paymentProviderReference) {
+    return "Payment link sent";
+  }
+  if (order.paymentTruthStatus === "PENDING_PROVIDER") return "Waiting for customer payment";
+  if (order.paymentState === "BLOCKED" || order.paymentState === "FAILED") return "Needs Manager";
+  if (order.paymentState === "UNPAID") return "Waiting For Payment";
+  return "Waiting for customer payment";
+}
+
+function getArrivalLabel(order: RestaurantOrder) {
+  const minutesUntil = getMinutesUntilReservation(order);
+
+  if (minutesUntil === null) return getSafeOrderDateTime(order.reservationTime);
+  if (minutesUntil < 0) return `${Math.abs(minutesUntil)} min late`;
+  if (minutesUntil <= 90) return `Arriving in ${minutesUntil} min`;
+
+  return getSafeOrderDateTime(order.reservationTime);
+}
+
+function getNextActionLabel(order: RestaurantOrder, releaseGate: ReleaseGateDecision) {
+  if (order.recoveryState === "OPEN_RECOVERY" || order.recoveryState === "OFFER_SENT") return "Recovering Slot";
+  if (order.recoveryState === "WAITING_RESPONSE") return "Waiting For Customer";
+  if (order.recoveryState === "RECOVERED") return "Replacement Found";
+  if (order.recoveryState === "FAILED_RECOVERY" || order.recoveryState === "EXPIRED") return "Recovery Failed";
+  if (needsRecoveredSetup(order)) return "Finish Setup";
+  if (!releaseGate.canRelease && releaseGate.requiresManagerReview) return "Needs Manager";
+  if (!releaseGate.canRelease) return releaseGate.label;
+  if (isArrivingSoon(order)) return "Prepare Arrival";
+  return "Ready To Release";
+}
+
+function getRecoveryStatusLabel(order: RestaurantOrder) {
+  if (order.recoveryState === "OPEN_RECOVERY" || order.recoveryState === "OFFER_SENT") return "Recovering Slot";
+  if (order.recoveryState === "WAITING_RESPONSE") return "Waiting For Customer";
+  if (order.recoveryState === "RECOVERED") return "Replacement Found";
+  if (order.recoveryState === "FAILED_RECOVERY" || order.recoveryState === "EXPIRED") return "Recovery Failed";
+  return null;
+}
+
 function getAutopilotStatus(order: RestaurantOrder) {
   const notes = (order.notes || "").toLowerCase();
 
@@ -589,6 +698,9 @@ export default function RestaurantStaffPage() {
   const [setupOrderId, setSetupOrderId] = useState<string | null>(null);
   const [setupAmount, setSetupAmount] = useState("");
   const [setupSummary, setSetupSummary] = useState("");
+  const [paymentCheckOrderId, setPaymentCheckOrderId] = useState<string | null>(null);
+  const [paymentCheckAmount, setPaymentCheckAmount] = useState("");
+  const [rushMode, setRushMode] = useState(true);
   const [quickAddTimeError, setQuickAddTimeError] = useState("");
   const { evaluateOrders } = useAutopilotStore();
 
@@ -620,6 +732,9 @@ export default function RestaurantStaffPage() {
   }, [staffMembers, currentStaffId]);
 
   const currentStaffName = currentStaff?.name ?? "Unknown staff";
+  const paymentCheckOrder = useMemo(() => {
+    return orders.find((order) => order.id === paymentCheckOrderId) ?? null;
+  }, [orders, paymentCheckOrderId]);
 
   const selectedServiceDate = useMemo(() => {
     return getServiceDateKey(quickAdd.serviceDatePreset, quickAdd.customServiceDate);
@@ -667,11 +782,19 @@ export default function RestaurantStaffPage() {
   useEffect(() => {
     const savedStaffId = window.localStorage.getItem(STAFF_STORAGE_KEY);
     if (savedStaffId) setCurrentStaffId(savedStaffId);
+
+    const savedRushMode = window.localStorage.getItem(RUSH_MODE_STORAGE_KEY);
+    if (savedRushMode) setRushMode(savedRushMode === "true");
   }, []);
 
   useEffect(() => {
     window.localStorage.setItem(STAFF_STORAGE_KEY, currentStaffId);
   }, [currentStaffId]);
+
+  function handleRushModeChange(enabled: boolean) {
+    setRushMode(enabled);
+    window.localStorage.setItem(RUSH_MODE_STORAGE_KEY, String(enabled));
+  }
 
   useEffect(() => {
     setQuickAdd((prev) => ({ ...prev, assignedStaff: currentStaffName }));
@@ -779,21 +902,26 @@ export default function RestaurantStaffPage() {
       const data = await res.json();
 
       if (!res.ok) {
-        alert(data.error || "Autopilot run failed.");
+        alert(data.error || "System check failed.");
         return;
       }
 
       const logs = Array.isArray(data.logs) ? data.logs : [];
       alert(
         logs.length > 0
-          ? `${data.message || "Autopilot run complete"}\n\n${logs.join("\n")}`
-          : data.message || "Autopilot run complete"
+          ? `${data.message || "System check complete"}\n\n${logs.join("\n")}`
+          : data.message || "System check complete"
       );
 
       await Promise.all([loadOrders(), loadWaitlist(), loadAudit(), loadAutopilotFeed()]);
     } finally {
       setSaving(false);
     }
+  }
+
+  async function requestManagerReview(order: RestaurantOrder) {
+    await logAudit("Manager review requested", currentStaffName, order.id);
+    alert(`Manager review requested for ${order.id}. Do not release this order until a manager clears it.`);
   }
 
   function handleStaffChange(staffId: string) {
@@ -1018,7 +1146,7 @@ export default function RestaurantStaffPage() {
     }
 
     if (order.recommendedIntervention && order.recommendedIntervention !== "NONE") {
-      guidance.push(`Collapse Engine recommends: ${interventionLabel(order.recommendedIntervention)}.`);
+      guidance.push(`Recommended next step: ${interventionLabel(order.recommendedIntervention)}.`);
     }
 
     if (dueNow > 0 && !order.depositRequired) {
@@ -1149,7 +1277,7 @@ export default function RestaurantStaffPage() {
         notes: `Recovered from ${originalOrder.id}. Customer accepted slot, but actual order value/details still need to be entered.`,
         assignedStaff: currentStaffName,
         riskLevel: "LOW",
-        protectionReason: "Recovered slot • awaiting actual order details",
+        protectionReason: "Recovered slot, awaiting actual order details",
         recoverySourceOrderId: originalOrder.id,
       };
 
@@ -1332,7 +1460,23 @@ export default function RestaurantStaffPage() {
     }
   }
 
-  async function verifyAndMarkPaid(orderId: string) {
+  function openPaymentCheck(order: RestaurantOrder) {
+    if (needsRecoveredSetup(order)) {
+      alert("Set up the recovered order details first.");
+      return;
+    }
+
+    const expectedAmount = getAmountDueNow(order);
+    if (expectedAmount <= 0) {
+      alert("There is no payment due for this order right now.");
+      return;
+    }
+
+    setPaymentCheckOrderId(order.id);
+    setPaymentCheckAmount(String(expectedAmount));
+  }
+
+  async function recordPaymentCheck(orderId: string, receivedAmount: number) {
     const target = orders.find((o) => o.id === orderId);
     if (!target) return;
     if (needsRecoveredSetup(target)) {
@@ -1347,20 +1491,12 @@ export default function RestaurantStaffPage() {
       return;
     }
 
-    const input = window.prompt(
-      `Enter terminal amount received for ${orderId}.\nExpected now: ${expectedAmount}`
-    );
-
-    if (input === null) return;
-
-    const enteredAmount = Number(input);
-
-    if (Number.isNaN(enteredAmount)) {
-      alert("Invalid amount.");
+    if (!Number.isFinite(receivedAmount)) {
+      alert("Enter the amount from the terminal, for example 120 or 120.50.");
       return;
     }
 
-    const verification = verifyPaymentAmount(expectedAmount, enteredAmount);
+    const verification = verifyPaymentAmount(expectedAmount, receivedAmount);
 
     const nextReliability = verification.reliabilityEvent
       ? applyReliabilityEvent(target.reliabilityScore, verification.reliabilityEvent)
@@ -1379,76 +1515,57 @@ export default function RestaurantStaffPage() {
       const updated = await patchOrder(orderId, {
         paymentState: verification.paymentState,
         paymentVerified: false,
+        paymentTruthStatus: "AMOUNT_MISMATCH",
+        paymentTruthSource: "STAFF_TERMINAL_CHECK",
+        paymentExpectedAmount: expectedAmount,
+        paymentPaidAmount: receivedAmount,
+        paymentCurrency: "MYR",
+        paymentMismatchReason: verification.reason,
         terminalMismatch: verification.terminalMismatch,
         reliabilityScore: nextReliability,
         riskLevel: nextRisk,
-        protectionReason: "Terminal mismatch",
+        protectionReason: "Amount mismatch",
         notes: verification.reason,
       });
 
       if (updated) {
-        await logAudit(verification.reason, currentStaffName, orderId);
+        await logAudit(`Amount mismatch: ${verification.reason}`, currentStaffName, orderId);
+        await logAudit("Release blocked - amount mismatch needs manager review", currentStaffName, orderId);
       }
 
+      setPaymentCheckOrderId(null);
+      setPaymentCheckAmount("");
       alert(verification.reason);
       return;
     }
 
-    if (target.depositRequired && !target.depositPaid) {
-      const remainingBalance = Math.max(
-        target.amount - getEffectiveDepositAmount(target),
-        0
-      );
-
-      const updated = await patchOrder(orderId, {
-        status: remainingBalance > 0 ? "PAYMENT_SENT" : "PAID",
-        paymentStage: "FINAL",
-        paymentState: "VERIFIED",
-        paymentVerified: remainingBalance === 0,
-        depositPaid: true,
-        terminalMismatch: false,
-        reliabilityScore: nextReliability,
-        riskLevel: remainingBalance === 0 ? "LOW" : (target.riskLevel ?? "LOW"),
-        protectionReason:
-          remainingBalance > 0 ? "Deposit secured" : "Payment verified",
-        notes:
-          remainingBalance > 0
-            ? `Deposit verified successfully. Remaining balance due: ${formatCurrency(
-                remainingBalance
-              )}`
-            : "Deposit verified and order fully paid.",
-      });
-
-      if (updated) {
-        await logAudit("Deposit verified successfully", currentStaffName, orderId);
-      }
-
-      alert(
-        remainingBalance > 0
-          ? `Deposit verified. Remaining balance: ${formatCurrency(remainingBalance)}`
-          : "Payment verified successfully."
-      );
-      return;
-    }
-
     const updated = await patchOrder(orderId, {
-      status: "PAID",
-      paymentStage: "FINAL",
-      paymentState: "VERIFIED",
-      paymentVerified: true,
-      depositPaid: true,
+      status: "PAYMENT_SENT",
+      paymentStage:
+        target.depositRequired && !target.depositPaid ? "DEPOSIT" : "FINAL",
+      paymentState: "PENDING",
+      paymentVerified: false,
+      paymentTruthStatus: "PENDING_PROVIDER",
+      paymentTruthSource: "STAFF_TERMINAL_CHECK",
+      paymentExpectedAmount: expectedAmount,
+      paymentPaidAmount: receivedAmount,
+      paymentCurrency: "MYR",
       terminalMismatch: false,
       reliabilityScore: nextReliability,
-      riskLevel: "LOW",
-      protectionReason: "Payment verified",
-      notes: "Final payment verified successfully.",
+      riskLevel: target.riskLevel ?? "LOW",
+      protectionReason: "Waiting for provider confirmation",
+      notes:
+        "Staff recorded matching payment proof. Do not release until provider confirms payment or a manager approves.",
     });
 
     if (updated) {
-      await logAudit("Final payment verified successfully", currentStaffName, orderId);
+      await logAudit("Payment proof received - waiting for provider confirmation", currentStaffName, orderId);
+      await logAudit("Release blocked - provider payment confirmation required", currentStaffName, orderId);
     }
 
-    alert("Final payment verified successfully.");
+    setPaymentCheckOrderId(null);
+    setPaymentCheckAmount("");
+    alert("Payment check recorded. Do not release until provider confirmation or manager approval.");
   }
 
   async function sendPaymentLink(order: RestaurantOrder) {
@@ -1456,21 +1573,34 @@ export default function RestaurantStaffPage() {
       alert("Set up the recovered order details first.");
       return;
     }
-    const amountDueNow = getAmountDueNow(order);
 
-    const updated = await patchOrder(order.id, {
-      status: "PAYMENT_SENT",
-      paymentStage:
-        order.depositRequired && !order.depositPaid ? "DEPOSIT" : "FINAL",
-      paymentState: sendPaymentLinkTransition(),
-      notes: `Payment link sent. ${getPaymentStageLabel(order)}: ${formatCurrency(
-        amountDueNow
-      )}`,
-    });
+    setSaving(true);
+    try {
+      const res = await fetch("/api/payments/request", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ orderId: order.id }),
+      });
+      const data = await res.json();
 
-    if (updated) {
-      await logAudit("Sent payment link", currentStaffName, order.id);
-      window.open(`/pay/${order.id}`, "_blank");
+      if (!res.ok) {
+        alert(data.error || "Failed to prepare payment request.");
+        return;
+      }
+
+      if (data.order) {
+        setOrders((prev) => prev.map((candidate) => (candidate.id === order.id ? data.order : candidate)));
+      }
+
+      if (data.provider?.paymentLinkCreated) {
+        alert("Payment link sent. Waiting for customer payment.");
+      } else {
+        alert(data.provider?.error || "Payment request recorded, but provider setup is incomplete.");
+      }
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -1484,11 +1614,17 @@ export default function RestaurantStaffPage() {
 
     const updated = await patchOrder(orderId, {
       paymentState: submitScreenshotTransition(),
-      notes: `Customer submitted screenshot for ${getPaymentStageLabel(target).toLowerCase()}. Manual verification required.`,
+      paymentVerified: false,
+      paymentTruthStatus: "SCREENSHOT_ONLY",
+      paymentTruthSource: "CUSTOMER_SCREENSHOT",
+      paymentExpectedAmount: getAmountDueNow(target),
+      paymentCurrency: "MYR",
+      notes: `Customer sent proof for ${getPaymentStageLabel(target).toLowerCase()}. Do not release until provider confirms payment or a manager approves.`,
     });
 
     if (updated) {
-      await logAudit("Marked screenshot submitted", currentStaffName, orderId);
+      await logAudit("Payment proof received", currentStaffName, orderId);
+      await logAudit("Release blocked - screenshot is not final payment proof", currentStaffName, orderId);
     }
   }
 
@@ -1664,8 +1800,25 @@ export default function RestaurantStaffPage() {
   }, [orders, isBlocked]);
 
   const activeOrders = useMemo(() => {
-    return orders.filter((o) => o.status !== "CANCELLED" && o.status !== "NO_SHOW");
-  }, [orders]);
+    return orders
+      .filter((o) => o.status !== "CANCELLED" && o.status !== "NO_SHOW")
+      .sort((a, b) => {
+        const score = (order: RestaurantOrder) => {
+          let total = 0;
+          if (isBlocked(order)) total += 100;
+          if (order.paymentState === "BLOCKED" || order.paymentState === "FAILED") total += 80;
+          if (order.paymentState === "UNPAID" || order.status === "UNPAID") total += 50;
+          if (order.paymentState === "PENDING" || order.status === "PAYMENT_SENT") total += 40;
+          if (order.collapseRiskTier === "CRITICAL") total += 35;
+          if (order.collapseRiskTier === "AT_RISK") total += 25;
+          if (isArrivingSoon(order)) total += 20;
+          if (needsRecoveredSetup(order)) total += 15;
+          return total;
+        };
+
+        return score(b) - score(a);
+      });
+  }, [orders, isBlocked]);
 
   const closedOrders = useMemo(() => {
     return orders.filter((o) => o.status === "CANCELLED" || o.status === "NO_SHOW");
@@ -1697,6 +1850,30 @@ export default function RestaurantStaffPage() {
         order.paymentState === "FAILED"
     );
   }, [activeOrders, isBlocked]);
+
+  const arrivingSoonOrders = useMemo(() => {
+    return activeOrders.filter(isArrivingSoon);
+  }, [activeOrders]);
+
+  const peakCompression = rushMode || activeOrders.length >= 8;
+
+  const rushPriorityOrders = useMemo(() => {
+    const seen = new Set<string>();
+    const priority = [
+      ...staffRiskQueue,
+      ...staffPaymentTruth.blocked,
+      ...staffPaymentTruth.unpaid,
+      ...staffPaymentTruth.pending,
+      ...staffPaymentTruth.awaitingSetup,
+      ...arrivingSoonOrders,
+    ];
+
+    return priority.filter((order) => {
+      if (seen.has(order.id)) return false;
+      seen.add(order.id);
+      return order.status !== "CANCELLED" && order.status !== "NO_SHOW";
+    });
+  }, [arrivingSoonOrders, staffPaymentTruth, staffRiskQueue]);
 
   const agentDecisionByOrderId = useMemo(() => {
     const map = new Map<string, MultiAgentOperationalBrain>();
@@ -1733,6 +1910,23 @@ export default function RestaurantStaffPage() {
     for (const item of audit) {
       if (item.orderId && item.meta?.operationalSimulation && !map.has(item.orderId)) {
         map.set(item.orderId, item.meta.operationalSimulation);
+      }
+    }
+
+    return map;
+  }, [audit]);
+
+  const inboundReplyByOrderId = useMemo(() => {
+    const map = new Map<string, NonNullable<AuditItem["meta"]>>();
+
+    for (const item of audit) {
+      if (
+        item.orderId &&
+        item.orderId !== "COMMUNICATION" &&
+        item.meta?.operationalEvent === "INBOUND_OPERATIONAL_MESSAGE" &&
+        !map.has(item.orderId)
+      ) {
+        map.set(item.orderId, item.meta);
       }
     }
 
@@ -1792,6 +1986,17 @@ export default function RestaurantStaffPage() {
 
 
               <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleRushModeChange(!rushMode)}
+                  className={`min-h-14 rounded-2xl border px-5 py-3 text-sm font-bold shadow-sm ${
+                    rushMode
+                      ? "border-red-200 bg-red-50 text-red-700"
+                      : "border-neutral-300 bg-white text-neutral-800"
+                  }`}
+                >
+                  Rush Mode {rushMode ? "On" : "Off"}
+                </button>
                 <div className="rounded-2xl border border-neutral-300 bg-white px-4 py-2">
                   <label className="block text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500">
                     Current staff
@@ -1803,7 +2008,7 @@ export default function RestaurantStaffPage() {
                   >
                     {staffMembers.map((staff) => (
                       <option key={staff.id} value={staff.id}>
-                        {staff.name} · {staff.role}
+                        {staff.name} / {staff.role}
                       </option>
                     ))}
                   </select>
@@ -1812,54 +2017,23 @@ export default function RestaurantStaffPage() {
                 <button
                   onClick={runAutopilotNow}
                   disabled={saving}
-                  className="rounded-2xl border border-green-300 bg-green-50 px-5 py-3 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+                  className="min-h-14 rounded-2xl border border-green-300 bg-green-50 px-6 py-4 text-base font-bold text-green-700 hover:bg-green-100 disabled:opacity-50"
                 >
-                  {saving ? "Running..." : "Run Autopilot"}
+                  {saving ? "Checking..." : "Check Now"}
                 </button>
-<button
-  onClick={async () => {
-    const confirmReset = confirm(
-      "Reset demo data? This will clear all current orders."
-    );
-    if (!confirmReset) return;
-
-    try {
-      const res = await fetch("/api/demo/reset", {
-        method: "POST",
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        alert(data.error || "Reset failed");
-        return;
-      }
-
-      alert("Demo data reset successfully");
-      window.location.reload();
-    } catch (err) {
-      alert("Something went wrong");
-      console.error(err);
-    }
-  }}
-  className="rounded-2xl border border-blue-300 bg-blue-50 px-5 py-3 text-sm font-medium text-blue-700 hover:bg-blue-100"
->
-  Reset Demo Data
-</button>
-
                 <button
                   onClick={() => {
                     setActiveStaffTab("today");
                     setQuickAddOpen((prev) => !prev);
                   }}
-                  className="rounded-2xl bg-black px-5 py-3 text-sm font-medium text-white"
+                  className="min-h-14 rounded-2xl bg-black px-6 py-4 text-base font-bold text-white"
                 >
-                  {quickAddOpen ? "Close Quick Add" : "Quick Add"}
+                  {quickAddOpen ? "Close New Booking" : "New Booking"}
                 </button>
 
                 <Link
                   href="/restaurant/owner"
-                  className="rounded-2xl border border-neutral-300 bg-white px-5 py-3 text-sm font-medium text-neutral-900"
+                  className="min-h-14 rounded-2xl border border-neutral-300 bg-white px-6 py-4 text-base font-bold text-neutral-900"
                 >
                   Owner View
                 </Link>
@@ -1884,9 +2058,9 @@ export default function RestaurantStaffPage() {
               subtitle="Do not release yet"
             />
             <TopCard
-              title="Collapse Watch"
+              title="At Risk"
               value={String(metrics.collapseWatch)}
-              subtitle="At-risk or critical bookings"
+              subtitle="Bookings that may be lost"
             />
           </section>
 
@@ -1901,7 +2075,7 @@ export default function RestaurantStaffPage() {
                       key={tab.id}
                       type="button"
                       onClick={() => setActiveStaffTab(tab.id)}
-                      className={`min-w-fit rounded-full border px-4 py-2 text-sm font-semibold transition ${
+                      className={`min-h-12 min-w-fit rounded-full border px-5 py-3 text-sm font-bold transition ${
                         selected
                           ? "border-neutral-900 bg-neutral-950 text-white shadow-sm"
                           : "border-neutral-200 bg-white text-neutral-600 hover:border-neutral-300 hover:text-neutral-950"
@@ -1913,7 +2087,7 @@ export default function RestaurantStaffPage() {
                 })}
               </div>
 
-              <div className="grid gap-2 text-xs text-neutral-600 md:grid-cols-4 lg:min-w-[520px]">
+              <div className={`${rushMode ? "hidden xl:grid" : "grid"} gap-2 text-xs text-neutral-600 md:grid-cols-4 lg:min-w-[520px]`}>
                 <div className="rounded-2xl border border-neutral-200 bg-white/80 px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-medium text-neutral-500">Needs Action</span>
@@ -1955,7 +2129,125 @@ export default function RestaurantStaffPage() {
             </p>
           </div>
 
+          {rushMode ? (
+            <section className="rounded-[24px] border border-red-200 bg-red-50 p-4 shadow-sm">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="text-sm font-bold uppercase tracking-[0.14em] text-red-700">
+                    Rush Mode Active
+                  </p>
+                  <p className="mt-1 text-sm text-red-800">
+                    Urgent, unpaid, blocked, and arriving-soon orders are emphasized. Deeper diagnostics stay available inside order details.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs font-bold text-red-700">
+                  <span className="rounded-full border border-red-200 bg-white px-3 py-1.5">Unsafe {metrics.blockedOrders}</span>
+                  <span className="rounded-full border border-red-200 bg-white px-3 py-1.5">Payments {staffPaymentTruth.unpaid.length + staffPaymentTruth.pending.length}</span>
+                  <span className="rounded-full border border-red-200 bg-white px-3 py-1.5">Arriving {arrivingSoonOrders.length}</span>
+                </div>
+              </div>
+            </section>
+          ) : null}
+
+          <OperationalCapacityPanel compact staffMode />
+          <LiveServiceCoordinationPanel compact staffMode />
+          <AutonomousOperationalExecutionPanel compact staffMode />
+          <OperationalCommandCenter compact staffMode />
+          <OperationalRuntimePanel compact staffMode />
+          <OperationalWorkerMeshPanel compact staffMode />
+
           <div className={activeStaffTab === "today" ? "space-y-6" : "hidden"}>
+          <section className="rounded-[28px] border border-neutral-200 bg-white p-5 shadow-sm md:p-6">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.16em] text-neutral-500">
+                  Rush Priority
+                </p>
+                <h2 className="mt-1 text-2xl font-semibold tracking-tight">
+                  Do these first
+                </h2>
+                <p className="mt-1 text-sm text-neutral-600">
+                  Blocked, unpaid, arriving soon, and recovered orders are pulled to the top.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveStaffTab("today");
+                  setQuickAddOpen(true);
+                }}
+                className="min-h-14 rounded-2xl bg-neutral-950 px-6 py-4 text-base font-bold text-white"
+              >
+                New Booking
+              </button>
+            </div>
+
+            {rushPriorityOrders.length > 0 ? (
+              <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                {rushPriorityOrders.slice(0, 8).map((order, index) => {
+                  const minutesUntil = getMinutesUntilReservation(order);
+                  const blocked = isBlocked(order);
+
+                  return (
+                    <article
+                      key={orderRenderKey("today-rush-priority", order, index)}
+                      className={`rounded-3xl border p-5 shadow-sm ${
+                        blocked
+                          ? "border-red-200 bg-red-50"
+                          : isArrivingSoon(order)
+                            ? "border-blue-200 bg-blue-50"
+                          : order.paymentState === "UNPAID" || order.status === "UNPAID"
+                            ? "border-amber-200 bg-amber-50"
+                            : "border-neutral-200 bg-neutral-50"
+                      }`}
+                    >
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-lg font-bold tracking-tight text-neutral-950">{order.customerName}</p>
+                            <span className="rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs font-semibold text-neutral-700">
+                              {order.id}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-sm text-neutral-700">
+                            {getArrivalLabel(order)} · {formatCurrency(getAmountDueNow(order))} due
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${paymentBadgeClasses(order.paymentState)}`}>
+                              {order.paymentState ?? "UNPAID"}
+                            </span>
+                            {minutesUntil !== null ? (
+                              <span className="rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs font-semibold text-neutral-700">
+                                {minutesUntil >= 0 ? `${minutesUntil} min away` : `${Math.abs(minutesUntil)} min late`}
+                              </span>
+                            ) : null}
+                            {order.collapseRiskTier ? (
+                              <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${collapseRiskBadgeClasses(order.collapseRiskTier)}`}>
+                                {order.collapseRiskTier}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setActiveStaffTab(blocked || order.paymentState === "UNPAID" || order.paymentState === "PENDING" ? "payment" : "orders")}
+                          className="min-h-14 shrink-0 rounded-2xl bg-neutral-950 px-5 py-3 text-base font-bold text-white"
+                        >
+                          {getRushActionLabel(order)}
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="mt-4 rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+                No urgent bookings right now. Staff can add a new order or continue normal prep.
+              </div>
+            )}
+          </section>
+
           <section className="rounded-[28px] border border-yellow-200 bg-yellow-50 p-5 shadow-sm md:p-6">
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
@@ -2028,7 +2320,7 @@ export default function RestaurantStaffPage() {
                       ) : null}
                     </div>
                     <p className="mt-2 text-red-800">
-                      {order.id} · {formatCurrency(order.amount)} · {getProtectionStatus(order)}
+                      {order.id} / {formatCurrency(order.amount)} / {getProtectionStatus(order)}
                     </p>
                   </article>
                 ))}
@@ -2044,13 +2336,13 @@ export default function RestaurantStaffPage() {
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
                 <p className="text-sm font-semibold uppercase tracking-[0.16em] text-green-700">
-                  Autopilot Feed
+                  System Action Feed
                 </p>
                 <h2 className="mt-1 text-xl font-semibold tracking-tight text-neutral-950">
                   What Valsentra handled for staff
                 </h2>
                 <p className="mt-1 text-sm text-neutral-600">
-                  Audit-backed timeline of automatic actions, staff actions, and revenue protection events.
+                  Timeline of automatic actions, staff actions, and revenue protection events.
                 </p>
               </div>
 
@@ -2081,7 +2373,7 @@ export default function RestaurantStaffPage() {
                         </p>
                         <p className="mt-1 text-xs opacity-70">{item.timeLabel}</p>
                         <p className="mt-1 text-xs opacity-70">
-                          {item.staff} · {item.orderId}
+                          {item.staff} / {item.orderId}
                         </p>
                       </div>
                     </div>
@@ -2090,7 +2382,7 @@ export default function RestaurantStaffPage() {
               </div>
             ) : (
               <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm text-neutral-600">
-                No autopilot or audit activity yet. Run Autopilot or handle an order to generate the feed.
+                No system activity yet. Use Check Now or handle an order to generate the feed.
               </div>
             )}
           </section>
@@ -2347,7 +2639,7 @@ export default function RestaurantStaffPage() {
                     </div>
 
                     <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-sm">
-                      <span className="font-semibold text-neutral-900">Canonical reservation:</span>{" "}
+                      <span className="font-semibold text-neutral-900">Confirmed booking time:</span>{" "}
                       <span className={selectedReservationTime.ok ? "text-neutral-700" : "text-neutral-500"}>
                         {selectedReservationTime.ok
                           ? getSafeOrderDateTime(selectedReservationTime.reservationTime)
@@ -2405,7 +2697,7 @@ export default function RestaurantStaffPage() {
             <section className="rounded-[28px] border border-neutral-200 bg-white p-6 shadow-sm md:p-8">
               <div className="mb-5">
                 <p className="text-sm font-semibold uppercase tracking-[0.16em] text-red-600">
-                  Payment Truth
+                  Payments
                 </p>
                 <h2 className="mt-1 text-2xl font-semibold tracking-tight">
                   Which orders are safe to release?
@@ -2440,6 +2732,8 @@ export default function RestaurantStaffPage() {
                 const blocked = isBlocked(order);
                 const needsSetup = needsRecoveredSetup(order);
                 const staffGuidance = getStaffGuidance(order);
+                const recoveryStatus = getRecoveryStatusLabel(order);
+                const inboundReply = inboundReplyByOrderId.get(order.id);
                 const agentDecision = agentDecisionByOrderId.get(order.id);
                 const autonomousRecovery = autonomousRecoveryByOrderId.get(order.id);
                 const operationalSimulation = operationalSimulationByOrderId.get(order.id);
@@ -2456,18 +2750,24 @@ export default function RestaurantStaffPage() {
                   order.phone,
                   `Hi ${order.customerName}, your order ${order.id} is currently ${order.status}. Please complete payment or reply if you need help.`
                 );
+                const releaseGate: ReleaseGateDecision = canReleaseOrder(order);
+                const nextAction = getNextActionLabel(order, releaseGate);
 
                 return (
                   <article
                     key={orderRenderKey("orders-active-order", order, index)}
-                    className={`rounded-[24px] border p-5 md:p-6 ${
-                      blocked ? "border-red-200 bg-red-50" : "border-neutral-200 bg-neutral-50/50"
+                    className={`rounded-[28px] border p-5 shadow-sm md:p-6 ${
+                      blocked
+                        ? "border-red-200 bg-red-50"
+                        : isArrivingSoon(order)
+                          ? "border-blue-200 bg-blue-50"
+                          : "border-neutral-200 bg-neutral-50/50"
                     }`}
                   >
                     <div className="flex flex-col gap-6 lg:flex-row lg:justify-between">
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="text-xl font-semibold tracking-tight">
+                          <h3 className="text-2xl font-bold tracking-tight">
                             {order.customerName}
                           </h3>
 
@@ -2491,6 +2791,16 @@ export default function RestaurantStaffPage() {
                             {order.paymentState ?? "PENDING"}
                           </span>
 
+                          {!releaseGate.canRelease ? (
+                            <span className="rounded-full border border-red-200 bg-white px-3 py-1 text-xs font-semibold text-red-700">
+                              {releaseGate.label}
+                            </span>
+                          ) : (
+                            <span className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-semibold text-emerald-700">
+                              Confirmed Paid
+                            </span>
+                          )}
+
                           <span
                             className={`rounded-full border px-3 py-1 text-xs font-semibold ${riskBadgeClasses(
                               (order.riskLevel ?? "LOW") as RiskLevel
@@ -2505,18 +2815,64 @@ export default function RestaurantStaffPage() {
                                 order.collapseRiskTier
                               )}`}
                             >
-                              {order.collapseRiskTier} COLLAPSE · {order.collapseProbability ?? 0}%
+                              {order.collapseRiskTier} RISK / {order.collapseProbability ?? 0}%
                             </span>
                           )}
 
                           {isBlacklisted(order.reliabilityScore) && (
                             <span className="rounded-full bg-red-700 px-3 py-1 text-xs font-semibold text-white">
-                              BLACKLISTED
+                              MANAGER REVIEW
                             </span>
                           )}
+
+                          <span className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-bold text-neutral-800">
+                            {nextAction}
+                          </span>
+
+                          {recoveryStatus ? (
+                            <span className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-bold text-emerald-700">
+                              {recoveryStatus}
+                            </span>
+                          ) : null}
+
+                          {inboundReply?.operationalLabel ? (
+                            <span className={`rounded-full border bg-white px-3 py-1 text-xs font-bold ${
+                              inboundReply.requiresHumanReview
+                                ? "border-amber-200 text-amber-700"
+                                : "border-blue-200 text-blue-700"
+                            }`}>
+                              {inboundReply.operationalLabel}
+                            </span>
+                          ) : null}
                         </div>
 
-                        {typeof order.collapseProbability === "number" && (
+                        <div className="mt-4 grid gap-3 md:grid-cols-3">
+                          <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-neutral-500">Arrival</p>
+                            <p className="mt-1 text-lg font-bold text-neutral-950">{getArrivalLabel(order)}</p>
+                          </div>
+                          <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-neutral-500">Payment</p>
+                            <p className="mt-1 text-lg font-bold text-neutral-950">{getStaffPaymentTruthLabel(order)}</p>
+                          </div>
+                          <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-neutral-500">Next Action</p>
+                            <p className="mt-1 text-lg font-bold text-neutral-950">{inboundReply?.operationalLabel ?? nextAction}</p>
+                          </div>
+                        </div>
+
+                        {inboundReply?.operationalLabel ? (
+                          <div className="mt-4 rounded-2xl border border-blue-200 bg-white p-4 text-sm text-blue-800">
+                            <p className="font-bold">{inboundReply.operationalLabel}</p>
+                            <p className="mt-1">
+                              {inboundReply.requiresHumanReview
+                                ? "Staff should review this customer reply before changing the booking."
+                                : "Customer reply was recorded and routed safely."}
+                            </p>
+                          </div>
+                        ) : null}
+
+                        {!peakCompression && typeof order.collapseProbability === "number" && (
                           <div
                             className={`mt-4 rounded-2xl border p-4 ${collapsePanelClasses(
                               order.collapseRiskTier
@@ -2525,7 +2881,7 @@ export default function RestaurantStaffPage() {
                             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                               <div>
                                 <p className="text-xs font-semibold uppercase tracking-[0.14em] opacity-70">
-                                  Collapse Probability Engine
+                                  Risk Watch
                                 </p>
                                 <p className="mt-1 text-lg font-semibold">
                                   {order.collapseProbability}% collapse probability
@@ -2538,7 +2894,7 @@ export default function RestaurantStaffPage() {
 
                               <div className="rounded-2xl border border-white/70 bg-white/70 px-4 py-3 text-left shadow-sm md:w-[220px]">
                                 <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500">
-                                  AI intervention
+                                  Next step
                                 </p>
                                 <p className="mt-1 text-sm font-semibold text-neutral-950">
                                   {interventionLabel(order.recommendedIntervention)}
@@ -2581,24 +2937,24 @@ export default function RestaurantStaffPage() {
                           </div>
                         )}
 
-                        {shouldShowAgentDecision ? (
+                        {!peakCompression && shouldShowAgentDecision ? (
                           <div className="mt-4">
                             <AgentDecisionPanel decision={agentDecision} compact />
                           </div>
                         ) : null}
 
-                        {operationalSimulation && shouldShowAgentDecision ? (
+                        {!peakCompression && operationalSimulation && shouldShowAgentDecision ? (
                           <div className="mt-4">
                             <OperationalSimulationPanel simulation={operationalSimulation} compact />
                           </div>
                         ) : null}
 
-                        {autonomousRecovery ? (
+                        {!peakCompression && autonomousRecovery ? (
                           <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
                             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                               <div>
                                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">
-                                  Autonomous recovery state
+                                  Recovery status
                                 </p>
                                 <p className="mt-1 text-sm font-semibold text-emerald-950">
                                   {autonomousRecovery.autonomousRecoveryAction?.recoveryStateTransition?.to?.replaceAll("_", " ") ??
@@ -2627,7 +2983,7 @@ export default function RestaurantStaffPage() {
                           </div>
                         ) : null}
 
-                        <div className="mt-4 grid gap-2 text-sm text-neutral-700 md:grid-cols-2">
+                        <div className={`${peakCompression ? "hidden" : "mt-4 grid"} gap-2 text-sm text-neutral-700 md:grid-cols-2`}>
                           <p>
                             <span className="font-medium text-neutral-900">Order made:</span>{" "}
                             {getSafeOrderDateTime(order.createdAt ?? order.reservationTime)}
@@ -2667,11 +3023,15 @@ export default function RestaurantStaffPage() {
                             {order.reliabilityScore}%
                           </p>
                           <p>
-                            <span className="font-medium text-neutral-900">Verified:</span>{" "}
-                            {order.paymentVerified ? "Yes" : "No"}
+                            <span className="font-medium text-neutral-900">Payment release:</span>{" "}
+                            {releaseGate.canRelease ? "Safe" : releaseGate.label}
                           </p>
                           <p>
-                            <span className="font-medium text-neutral-900">Autopilot:</span>{" "}
+                            <span className="font-medium text-neutral-900">Payment status:</span>{" "}
+                            {getStaffPaymentTruthLabel(order)}
+                          </p>
+                          <p>
+                            <span className="font-medium text-neutral-900">System action:</span>{" "}
                             <span className={getAutopilotTone(getAutopilotStatus(order))}>
                               {getAutopilotStatus(order)}
                             </span>
@@ -2720,6 +3080,22 @@ export default function RestaurantStaffPage() {
                           </div>
                         )}
 
+                        {!releaseGate.canRelease && (
+                          <div className="mt-4 rounded-2xl border border-red-200 bg-white p-4 text-sm text-red-700">
+                            <p className="font-semibold">Do Not Release</p>
+                            <p className="mt-1">{releaseGate.reason}</p>
+                            {releaseGate.blockers.length > 1 ? (
+                              <ul className="mt-2 list-disc space-y-1 pl-5">
+                                {releaseGate.blockers.map((blocker, blockerIndex) => (
+                                  <li key={`release-gate-${order.id}-${blocker}-${blockerIndex}`}>
+                                    {blocker}
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
+                          </div>
+                        )}
+
                         {blocked && getBlockReasons(order).length > 0 && (
                           <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4">
                             <p className="text-sm font-semibold text-red-700">
@@ -2740,55 +3116,65 @@ export default function RestaurantStaffPage() {
                         )}
                       </div>
 
-                      <div className="w-full lg:w-[220px]">
-                        <div className="grid gap-2">
+                      <div className="w-full lg:w-[240px]">
+                        <div className="sticky bottom-3 z-10 grid gap-3 rounded-3xl border border-neutral-200 bg-white/95 p-3 shadow-lg backdrop-blur lg:top-24 lg:bottom-auto">
                           {needsSetup && (
                             <button
                               type="button"
                               onClick={() => openRecoveredOrderSetup(order)}
-                              className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-medium text-white"
+                              className="min-h-14 rounded-2xl bg-blue-600 px-5 py-4 text-base font-bold text-white"
                             >
-                              Setup Order
+                              Finish Setup
                             </button>
                           )}
+
+                          {blocked ? (
+                            <button
+                              type="button"
+                              onClick={() => requestManagerReview(order)}
+                              className="min-h-14 rounded-2xl bg-red-700 px-5 py-4 text-base font-bold text-white"
+                            >
+                              Manager Review
+                            </button>
+                          ) : null}
 
                           <button
                             onClick={() => sendPaymentLink(order)}
                             disabled={saving || needsSetup}
-                            className="rounded-2xl border border-neutral-300 bg-white px-4 py-3 text-center text-sm font-medium text-neutral-900 disabled:opacity-50"
+                            className="min-h-14 rounded-2xl border border-neutral-300 bg-white px-5 py-4 text-center text-base font-bold text-neutral-900 disabled:opacity-50"
                           >
-                            Payment Link
+                            Send Payment Link
                           </button>
 
                           <button
                             type="button"
                             onClick={() => submitPaymentScreenshot(order.id)}
                             disabled={saving || needsSetup}
-                            className="rounded-2xl border border-neutral-300 bg-white px-4 py-3 text-center text-sm font-medium text-neutral-900 disabled:opacity-50"
+                            className="min-h-14 rounded-2xl border border-neutral-300 bg-white px-5 py-4 text-center text-base font-bold text-neutral-900 disabled:opacity-50"
                           >
-                            Screenshot Submitted
+                            Customer Sent Proof
                           </button>
 
                           <button
                             type="button"
                             disabled={needsSetup}
-                            className="rounded-2xl border border-neutral-300 bg-white px-4 py-3 text-center text-sm font-medium text-neutral-900 disabled:opacity-50"
+                            className="min-h-14 rounded-2xl border border-neutral-300 bg-white px-5 py-4 text-center text-base font-bold text-neutral-900 disabled:opacity-50"
                             onClick={() => {
                               if (needsSetup) return;
                               window.open(reminderLink, "_blank", "noreferrer");
                               logAudit("Sent WhatsApp reminder", currentStaffName, order.id);
                             }}
                           >
-                            WhatsApp Reminder
+                            Remind Customer
                           </button>
 
                           <button
                             type="button"
-                            onClick={() => verifyAndMarkPaid(order.id)}
+                            onClick={() => openPaymentCheck(order)}
                             disabled={saving || needsSetup}
-                            className="rounded-2xl bg-green-600 px-4 py-3 text-sm font-medium text-white disabled:opacity-50"
+                            className="min-h-14 rounded-2xl bg-green-600 px-5 py-4 text-base font-bold text-white disabled:opacity-50"
                           >
-                            Verify Payment
+                            Check Payment
                           </button>
 
                           <button
@@ -2800,8 +3186,9 @@ export default function RestaurantStaffPage() {
                               color: "#ffffff",
                               padding: "12px 16px",
                               borderRadius: "16px",
-                              fontSize: "14px",
-                              fontWeight: 500,
+                              fontSize: "16px",
+                              fontWeight: 700,
+                              minHeight: "56px",
                               border: "none",
                               width: "100%",
                               display: "block",
@@ -2815,9 +3202,9 @@ export default function RestaurantStaffPage() {
                             type="button"
                             onClick={() => markCancelled(order.id)}
                             disabled={saving}
-                            className="rounded-2xl bg-black px-4 py-3 text-sm font-medium text-white disabled:opacity-50"
+                            className="min-h-14 rounded-2xl bg-black px-5 py-4 text-base font-bold text-white disabled:opacity-50"
                           >
-                            Cancel Order
+                            Cancel Booking
                           </button>
                         </div>
                       </div>
@@ -2916,7 +3303,7 @@ export default function RestaurantStaffPage() {
                             </p>
                             <p className="text-neutral-500">
                               Replacement orders are created as drafts. Staff must enter
-                              the new customer’s real order value later.
+                              the new customerâ€™s real order value later.
                             </p>
                           </div>
                         </div>
@@ -3044,6 +3431,144 @@ export default function RestaurantStaffPage() {
             </div>
           )}
 
+          {paymentCheckOrder && (
+            <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-3 sm:items-center sm:p-4">
+              <div className="w-full max-w-md rounded-[28px] border border-neutral-200 bg-white p-5 shadow-2xl">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-neutral-500">
+                      Check Payment
+                    </p>
+                    <h3 className="mt-1 text-2xl font-semibold tracking-tight">
+                      {paymentCheckOrder.customerName}
+                    </h3>
+                    <p className="mt-1 text-sm text-neutral-600">
+                      Expected now: {formatCurrency(getAmountDueNow(paymentCheckOrder))}
+                    </p>
+                  </div>
+                  <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${paymentBadgeClasses(paymentCheckOrder.paymentState)}`}>
+                    {paymentCheckOrder.paymentState ?? "UNPAID"}
+                  </span>
+                </div>
+
+                <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-neutral-500">
+                    Amount shown on terminal
+                  </p>
+                  <p className="mt-2 min-h-10 text-4xl font-semibold tracking-tight text-neutral-950">
+                    {paymentCheckAmount || "0"}
+                  </p>
+                </div>
+
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  {["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0"].map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() =>
+                        setPaymentCheckAmount((current) =>
+                          key === "." && current.includes(".") ? current : `${current}${key}`
+                        )
+                      }
+                      className="min-h-14 rounded-2xl border border-neutral-200 bg-neutral-50 text-xl font-semibold text-neutral-950 active:bg-neutral-200"
+                    >
+                      {key}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setPaymentCheckAmount((current) => current.slice(0, -1))}
+                    className="min-h-14 rounded-2xl border border-neutral-200 bg-neutral-50 text-sm font-semibold text-neutral-950 active:bg-neutral-200"
+                  >
+                    Delete
+                  </button>
+                </div>
+
+                {Number(paymentCheckAmount) !== getAmountDueNow(paymentCheckOrder) ? (
+                  <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                    <p className="font-semibold">Amount Mismatch</p>
+                    <p className="mt-1">
+                      If this is underpaid or the wrong transfer amount, keep the order blocked and ask a manager to check.
+                    </p>
+                  </div>
+                ) : null}
+
+                <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                  <button
+                    type="button"
+                    disabled={saving || !paymentCheckAmount}
+                    onClick={() => recordPaymentCheck(paymentCheckOrder.id, Number(paymentCheckAmount))}
+                    className="min-h-14 rounded-2xl bg-green-600 px-5 py-4 text-base font-bold text-white disabled:opacity-50"
+                  >
+                    Record Check
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => requestManagerReview(paymentCheckOrder)}
+                    className="min-h-14 rounded-2xl bg-red-700 px-5 py-4 text-base font-bold text-white"
+                  >
+                    Needs Manager
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void submitPaymentScreenshot(paymentCheckOrder.id);
+                      setPaymentCheckOrderId(null);
+                      setPaymentCheckAmount("");
+                    }}
+                    className="min-h-14 rounded-2xl border border-neutral-300 bg-white px-5 py-4 text-base font-bold text-neutral-900"
+                  >
+                    Customer Sent Proof
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPaymentCheckOrderId(null);
+                      setPaymentCheckAmount("");
+                    }}
+                    className="min-h-14 rounded-2xl border border-neutral-300 bg-white px-5 py-4 text-base font-bold text-neutral-900"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <p className="mt-3 text-xs font-semibold text-red-700">
+                  Do Not Release until provider payment is confirmed or a manager approves.
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="sticky bottom-0 z-30 -mx-4 border-t border-neutral-200 bg-white/95 px-4 py-3 shadow-[0_-12px_30px_rgba(15,23,42,0.08)] backdrop-blur md:hidden">
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveStaffTab("today");
+                  setQuickAddOpen(true);
+                }}
+                className="min-h-14 rounded-2xl bg-neutral-950 px-3 py-3 text-sm font-bold text-white"
+              >
+                New Booking
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveStaffTab("payment")}
+                className="min-h-14 rounded-2xl border border-red-200 bg-red-50 px-3 py-3 text-sm font-bold text-red-700"
+              >
+                Payments
+              </button>
+              <button
+                type="button"
+                onClick={runAutopilotNow}
+                disabled={saving}
+                className="min-h-14 rounded-2xl border border-green-200 bg-green-50 px-3 py-3 text-sm font-bold text-green-700 disabled:opacity-50"
+              >
+                Check Now
+              </button>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -3091,7 +3616,7 @@ function PaymentTruthList({
                 </span>
               </div>
               <p className="mt-2 text-neutral-600">
-                {order.id} · {formatCurrency(order.amount)} · Verified: {order.paymentVerified ? "Yes" : "No"}
+                {order.id} / {formatCurrency(order.amount)} / {order.paymentVerified ? "Payment Confirmed" : "Waiting For Payment"}
               </p>
               {order.terminalMismatch ? (
                 <p className="mt-1 text-xs font-semibold text-red-700">

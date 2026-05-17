@@ -4,6 +4,7 @@ const LOOP_INTERVAL_MS = 60_000;
 
 type SchedulerState = {
   running: boolean;
+  organizationId?: string;
   interval?: ReturnType<typeof setInterval>;
   lastRunAt?: string;
   lastResult?: Awaited<ReturnType<typeof runContinuousOperationalPass>>;
@@ -24,11 +25,15 @@ function getState() {
   return globalScheduler.__valsentraContinuousScheduler;
 }
 
-export async function runContinuousOperationalLoopOnce() {
+export async function runContinuousOperationalLoopOnce({
+  organizationId = "org-valsentra",
+}: {
+  organizationId?: string;
+} = {}) {
   const state = getState();
 
   try {
-    const result = await runContinuousOperationalPass();
+    const result = await runContinuousOperationalPass({ organizationId });
     state.lastRunAt = new Date().toISOString();
     state.lastResult = result;
     state.lastError = undefined;
@@ -40,18 +45,23 @@ export async function runContinuousOperationalLoopOnce() {
   }
 }
 
-export function startContinuousOperationalLoop() {
+export function startContinuousOperationalLoop({
+  organizationId = "org-valsentra",
+}: {
+  organizationId?: string;
+} = {}) {
   const state = getState();
 
   if (state.running) return state;
 
   state.running = true;
-  void runContinuousOperationalLoopOnce().catch((error) => {
+  state.organizationId = organizationId;
+  void runContinuousOperationalLoopOnce({ organizationId }).catch((error) => {
     console.warn("Initial continuous operational pass failed", error);
   });
 
   state.interval = setInterval(() => {
-    void runContinuousOperationalLoopOnce().catch((error) => {
+    void runContinuousOperationalLoopOnce({ organizationId: state.organizationId }).catch((error) => {
       console.warn("Continuous operational pass failed", error);
     });
   }, LOOP_INTERVAL_MS);

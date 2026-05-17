@@ -9,15 +9,24 @@ function createOrderId() {
 export async function runWaitlistCascade({
   orderId,
   staffName = "System",
+  organizationId,
+  actorUserId,
 }: {
   orderId: string;
   staffName?: string;
+  organizationId?: string;
+  actorUserId?: string;
 }) {
-  const { data: order, error: orderError } = await supabaseAdmin
+  let orderQuery = supabaseAdmin
     .from("orders")
     .select("*")
-    .eq("id", orderId)
-    .single();
+    .eq("id", orderId);
+
+  if (organizationId) {
+    orderQuery = orderQuery.eq("organization_id", organizationId);
+  }
+
+  const { data: order, error: orderError } = await orderQuery.single();
 
   if (orderError || !order) {
     return { ok: false, error: "Order not found" };
@@ -28,6 +37,7 @@ export async function runWaitlistCascade({
       .from("orders")
       .select("id, customer_name, status")
       .eq("recovery_source_order_id", orderId)
+      .eq("organization_id", order.organization_id ?? organizationId ?? "org-valsentra")
       .maybeSingle();
 
   if (existingRecoveryError) {
@@ -44,7 +54,8 @@ export async function runWaitlistCascade({
 
   const { data: waitlist, error: waitlistError } = await supabaseAdmin
     .from("waitlist_leads")
-    .select("*");
+    .select("*")
+    .eq("organization_id", order.organization_id ?? organizationId ?? "org-valsentra");
 
   if (waitlistError) {
     return { ok: false, error: waitlistError.message };
@@ -135,8 +146,12 @@ export async function runWaitlistCascade({
       notes: `Recovered from ${order.id}. ${decisionReason} Actual order value/details still need to be entered.`,
       assigned_staff: staffName,
       risk_level: "LOW",
-      protection_reason: "Recovered slot • awaiting actual order details",
+      protection_reason: "Recovered slot, awaiting actual order details",
       recovery_source_order_id: order.id,
+      organization_id: order.organization_id ?? organizationId ?? "org-valsentra",
+      location_id: order.location_id ?? "loc-primary",
+      location_name: order.location_name ?? "Primary Location",
+      created_by: actorUserId ?? null,
     })
     .select()
     .single();
@@ -144,6 +159,16 @@ export async function runWaitlistCascade({
   if (createError) {
     return { ok: false, error: createError.message };
   }
+
+  await supabaseAdmin
+    .from("orders")
+    .update({
+      recovery_state: "RECOVERED",
+      recovery_updated_at: new Date().toISOString(),
+      recovery_selected_lead_id: String(lead.id),
+    })
+    .eq("id", order.id)
+    .eq("organization_id", order.organization_id ?? organizationId ?? "org-valsentra");
 
   await supabaseAdmin.from("audit_logs").insert(buildOperationalEvent({
     eventKey: `waitlist-success:${order.id}:${newOrder.id}`,

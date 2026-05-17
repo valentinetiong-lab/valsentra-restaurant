@@ -6,6 +6,7 @@ import {
   classifyTimelineSeverity,
   getTimelineEventTitle,
 } from "@/app/lib/intelligence/timelineClassifier";
+import { requireRouteRole } from "@/app/lib/security/routeProtection";
 
 function mapTimelineFromAudit(row: Record<string, any>) {
   const meta = row.meta ?? {};
@@ -36,11 +37,19 @@ function mapTimelineFromAudit(row: Record<string, any>) {
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const access = await requireRouteRole({
+    request,
+    route: "/api/intelligence/timeline",
+    allowedRoles: ["staff", "manager", "owner", "admin", "internal"],
+  });
+  if (!access.ok) return access.response;
+
   try {
     const { data, error } = await supabaseAdmin
       .from("audit_logs")
       .select("*")
+      .eq("meta->>organizationId", access.actor.organizationId)
       .order("created_at", { ascending: false })
       .limit(200);
 

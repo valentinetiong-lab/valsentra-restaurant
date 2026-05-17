@@ -35,6 +35,21 @@ type AuditItem = {
   createdAt?: string;
 };
 
+type TimelineMemoryItem = {
+  id: string;
+  orderId?: string | null;
+  actorSource?: string | null;
+  eventType: string;
+  summary: string;
+  severity: TimelineSeverity;
+  category: string;
+  timestamp: string;
+  metadata?: Record<string, any>;
+  traceId?: string | null;
+  executionId?: string | null;
+  correlationId?: string | null;
+};
+
 type OperationalTimelineEvent = {
   id: string;
   eventType: string;
@@ -274,13 +289,34 @@ function normalizeEvent(item: AuditItem): OperationalTimelineEvent {
         : meta.autonomousRecoveryAction
           ? "Autonomous Recovery Engine"
           : meta.communicationOrchestration
-            ? "Communication Orchestration"
+            ? "Communication System Action"
             : meta.customerOperationalMemory
               ? "Customer Operational Memory"
               : meta.multiAgentOperationalBrain
                 ? "Multi-Agent Operational Brain"
                 : item.staff ?? "Audit Log",
     raw: item,
+  };
+}
+
+function auditFromTimelineMemory(item: TimelineMemoryItem): AuditItem {
+  return {
+    id: item.id,
+    action: item.eventType.replaceAll("_", " "),
+    staff: item.actorSource ?? "Valsentra Timeline Memory",
+    orderId: item.orderId ?? undefined,
+    createdAt: item.timestamp,
+    meta: {
+      ...(item.metadata ?? {}),
+      timelineMemory: true,
+      title: item.eventType.replaceAll("_", " "),
+      summary: item.summary,
+      severity: item.severity,
+      category: item.category,
+      traceId: item.traceId,
+      executionId: item.executionId,
+      correlationId: item.correlationId,
+    },
   };
 }
 
@@ -325,6 +361,13 @@ export default function OperationalTimeline({
 
   async function loadAudit() {
     try {
+      const timelineRes = await fetch("/api/operational/timeline?limit=80", { cache: "no-store" });
+      const timelineData = await timelineRes.json();
+      if (timelineRes.ok && Array.isArray(timelineData.events) && timelineData.events.length > 0) {
+        setAuditEvents(timelineData.events.map(auditFromTimelineMemory));
+        return;
+      }
+
       const res = await fetch("/api/audit", { cache: "no-store" });
       const data = await res.json();
       if (res.ok && Array.isArray(data)) setAuditEvents(data);

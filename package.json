@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "worker:dev": "node --experimental-strip-types --loader ./scripts/ts-alias-loader.mjs scripts/operational-worker.ts --mode=continuous",
+    "worker:once": "node --experimental-strip-types --loader ./scripts/ts-alias-loader.mjs scripts/operational-worker.ts --mode=once",
+    "worker:health": "node --experimental-strip-types --loader ./scripts/ts-alias-loader.mjs scripts/operational-worker.ts --mode=health"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.100.1",

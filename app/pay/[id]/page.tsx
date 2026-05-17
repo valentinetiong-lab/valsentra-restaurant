@@ -144,69 +144,18 @@ export default function PayOrderPage() {
 
     const updated = await patchOrder({
       paymentState: "PENDING",
-      notes: `Customer submitted screenshot for ${getPaymentStageLabel(order).toLowerCase()}. Awaiting verification.`,
+      paymentVerified: false,
+      paymentTruthStatus: "SCREENSHOT_ONLY",
+      paymentTruthSource: "CUSTOMER_SCREENSHOT",
+      paymentExpectedAmount: amountDueNow,
+      paymentCurrency: "MYR",
+      notes: `Customer sent proof for ${getPaymentStageLabel(order).toLowerCase()}. Waiting for provider confirmation or manager review.`,
       status: order.status === "UNPAID" ? "PAYMENT_SENT" : order.status,
     });
 
     if (updated) {
       await logAudit("Customer submitted payment screenshot");
-      setSuccessMessage("Screenshot submitted. Waiting for verification.");
-    }
-  }
-
-  async function handleSimulatePaid() {
-    if (!order) return;
-
-    if (order.depositRequired && !order.depositPaid) {
-      const remainingBalance = Math.max(
-        order.amount - Number(order.depositAmount ?? 0),
-        0
-      );
-
-      const updated = await patchOrder({
-        depositPaid: true,
-        paymentStage: "FINAL",
-        paymentState: "VERIFIED",
-        paymentVerified: remainingBalance === 0,
-        status: remainingBalance === 0 ? "PAID" : "PAYMENT_SENT",
-        protectionReason:
-          remainingBalance === 0 ? "Payment verified" : "Deposit secured",
-        notes:
-          remainingBalance === 0
-            ? "Deposit paid and order fully settled."
-            : `Deposit paid successfully. Remaining balance due: ${formatCurrency(
-                remainingBalance
-              )}`,
-      });
-
-      if (updated) {
-        await logAudit("Deposit marked paid from payment page");
-        setSuccessMessage(
-          remainingBalance === 0
-            ? "Payment fully verified."
-            : `Deposit verified. Remaining balance due: ${formatCurrency(
-                remainingBalance
-              )}`
-        );
-      }
-
-      return;
-    }
-
-    const updated = await patchOrder({
-      status: "PAID",
-      paymentStage: "FINAL",
-      paymentState: "VERIFIED",
-      paymentVerified: true,
-      depositPaid: true,
-      terminalMismatch: false,
-      protectionReason: "Payment verified",
-      notes: "Final payment marked paid from payment page.",
-    });
-
-    if (updated) {
-      await logAudit("Final payment marked verified from payment page");
-      setSuccessMessage("Final payment verified successfully.");
+      setSuccessMessage("Proof received. Please wait while the restaurant checks payment.");
     }
   }
 
@@ -302,7 +251,7 @@ export default function PayOrderPage() {
           <section className="rounded-[28px] border border-neutral-200 bg-white p-6 shadow-sm md:p-8">
             <h2 className="text-2xl font-semibold tracking-tight">Payment Actions</h2>
             <p className="mt-2 text-sm text-neutral-600">
-              This page now handles the correct amount for the current payment step instead of always treating everything as full payment.
+              Customer proof can be submitted here, but payment is only confirmed after the restaurant receives provider confirmation.
             </p>
 
             <div className="mt-5 flex flex-col gap-3 md:flex-row">
@@ -312,14 +261,6 @@ export default function PayOrderPage() {
                 className="rounded-2xl border border-neutral-300 bg-white px-5 py-3 text-sm font-medium text-neutral-900 disabled:opacity-50"
               >
                 {saving ? "Saving..." : "Submit Screenshot"}
-              </button>
-
-              <button
-                onClick={handleSimulatePaid}
-                disabled={saving || amountDueNow <= 0}
-                className="rounded-2xl bg-green-600 px-5 py-3 text-sm font-medium text-white disabled:opacity-50"
-              >
-                {saving ? "Saving..." : `Simulate Payment of ${formatCurrency(amountDueNow)}`}
               </button>
 
               <Link

@@ -1,16 +1,14 @@
 import "server-only";
 import { createClient } from "@supabase/supabase-js";
+import {
+  requireEnvironmentVariable,
+  validateProductionEnvironment,
+} from "@/app/lib/security/environment";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+validateProductionEnvironment();
 
-if (!supabaseUrl) {
-  throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
-}
-
-if (!serviceRoleKey) {
-  throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
-}
+const supabaseUrl = requireEnvironmentVariable("NEXT_PUBLIC_SUPABASE_URL");
+const serviceRoleKey = requireEnvironmentVariable("SUPABASE_SERVICE_ROLE_KEY");
 
 export const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
   auth: {

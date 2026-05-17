@@ -9,23 +9,40 @@ import {
   getAdaptiveDecisionContext,
 } from "@/app/lib/operationalMemoryEngine";
 import { resolveOperationalPolicy } from "@/app/lib/policyEngine";
+import { requireRouteRole } from "@/app/lib/security/routeProtection";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const access = await requireRouteRole({
+    request,
+    route: "/api/intelligence/organization",
+    allowedRoles: ["owner", "manager", "admin", "internal"],
+  });
+  if (!access.ok) return access.response;
+
   try {
     const [
       { data: ordersRaw, error: ordersError },
       { data: auditRaw, error: auditError },
       { data: waitlistRaw, error: waitlistError },
     ] = await Promise.all([
-      supabaseAdmin.from("orders").select("*").order("created_at", { ascending: false }),
+      supabaseAdmin
+        .from("orders")
+        .select("*")
+        .eq("organization_id", access.actor.organizationId)
+        .order("created_at", { ascending: false }),
       supabaseAdmin
         .from("audit_logs")
         .select("*")
+        .eq("meta->>organizationId", access.actor.organizationId)
         .order("created_at", { ascending: false })
         .limit(500),
-      supabaseAdmin.from("waitlist_leads").select("id").limit(200),
+      supabaseAdmin
+        .from("waitlist_leads")
+        .select("id")
+        .eq("organization_id", access.actor.organizationId)
+        .limit(200),
     ]);
 
     if (ordersError) {

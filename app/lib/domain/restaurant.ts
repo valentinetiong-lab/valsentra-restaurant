@@ -21,6 +21,29 @@ export type PaymentState =
 
 export type PaymentStage = "DEPOSIT" | "FINAL" | "AWAITING_DETAILS";
 
+export type PaymentTruthStatus =
+  | "PENDING_PROVIDER"
+  | "SCREENSHOT_ONLY"
+  | "PROVIDER_CONFIRMED"
+  | "AMOUNT_MISMATCH"
+  | "FAILED"
+  | "MANAGER_OVERRIDE";
+
+export type PaymentTruthSource =
+  | "CUSTOMER_SCREENSHOT"
+  | "STAFF_TERMINAL_CHECK"
+  | "PROVIDER_CALLBACK"
+  | "MANAGER_OVERRIDE"
+  | "SYSTEM";
+
+export type RecoveryState =
+  | "OPEN_RECOVERY"
+  | "OFFER_SENT"
+  | "WAITING_RESPONSE"
+  | "RECOVERED"
+  | "EXPIRED"
+  | "FAILED_RECOVERY";
+
 export type Organization = {
   id: string;
   name: string;
@@ -57,6 +80,19 @@ export type RestaurantOrder = {
   paymentState?: PaymentState;
   paymentStage?: PaymentStage;
   paymentVerified?: boolean;
+  paymentIntentId?: string | null;
+  paymentProviderReference?: string | null;
+  paymentExpectedAmount?: number | null;
+  paymentPaidAmount?: number | null;
+  paymentCurrency?: string | null;
+  paymentTruthStatus?: PaymentTruthStatus | null;
+  paymentTruthSource?: PaymentTruthSource | string | null;
+  paymentProviderVerifiedAt?: string | null;
+  paymentMismatchReason?: string | null;
+  paymentProviderMetadata?: Record<string, unknown> | null;
+  paymentManagerOverrideBy?: string | null;
+  paymentManagerOverrideAt?: string | null;
+  paymentManagerOverrideReason?: string | null;
   depositRequired: boolean;
   depositAmount?: number;
   depositPaid: boolean;
@@ -71,6 +107,12 @@ export type RestaurantOrder = {
   slotHoldExpiresAt?: string | null;
   lastReminderSentAt?: string | null;
   autoReleaseEligible?: boolean;
+  recoveryState?: RecoveryState | null;
+  recoveryStartedAt?: string | null;
+  recoveryUpdatedAt?: string | null;
+  recoveryExpiresAt?: string | null;
+  recoveryAttemptCount?: number | null;
+  recoverySelectedLeadId?: string | number | null;
   recoverySourceOrderId?: string;
   awaitingDetails?: boolean;
   collapseProbability?: number;

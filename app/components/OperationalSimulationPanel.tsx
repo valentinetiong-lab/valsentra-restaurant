@@ -174,7 +174,7 @@ export default function OperationalSimulationPanel({
             {formatMoney(simulation.estimatedRevenueLoss)}
           </p>
           <p className="mt-2 text-xs leading-5 text-neutral-600">
-            Simulation only. Execution still requires recovery/orchestration guardrails.
+            Simulation only. Actions still require recovery and safety guardrails.
           </p>
         </div>
       </div>

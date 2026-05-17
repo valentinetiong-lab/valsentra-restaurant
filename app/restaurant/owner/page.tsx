@@ -12,14 +12,23 @@ import AgentDecisionPanel, {
 import InfrastructureHealthPanel, {
   type InfrastructureHealth,
 } from "@/app/components/InfrastructureHealthPanel";
+import OperationalWorkerPanel from "@/app/components/OperationalWorkerPanel";
 import OperationalBrainPanel from "@/app/components/OperationalBrainPanel";
 import OperationalKnowledgeGraphPanel, {
   type OperationalKnowledgeGraph,
 } from "@/app/components/OperationalKnowledgeGraphPanel";
+import OperationalIncidentCenter from "@/app/components/OperationalIncidentCenter";
+import OperationalCapacityPanel from "@/app/components/OperationalCapacityPanel";
+import LiveServiceCoordinationPanel from "@/app/components/LiveServiceCoordinationPanel";
+import AutonomousOperationalExecutionPanel from "@/app/components/AutonomousOperationalExecutionPanel";
+import OperationalCommandCenter from "@/app/components/OperationalCommandCenter";
+import OperationalRuntimePanel from "@/app/components/OperationalRuntimePanel";
+import OperationalWorkerMeshPanel from "@/app/components/OperationalWorkerMeshPanel";
 import OperationalSimulationPanel, {
   type OperationalSimulation,
 } from "@/app/components/OperationalSimulationPanel";
 import OperationalTimeline from "@/app/components/OperationalTimeline";
+import PilotReadinessChecklist from "@/app/components/PilotReadinessChecklist";
 import { calculateRevenueSnapshot } from "@/app/lib/revenueEngine";
 import {
   buildReliabilityProfileFromOrders,
@@ -27,6 +36,7 @@ import {
 } from "@/app/lib/reliabilityEngine";
 import IntelligenceTimeline from "@/app/components/IntelligenceTimeline";
 import type { PaymentState } from "@/app/lib/domain/restaurant";
+import type { RecoveryState } from "@/app/lib/domain/restaurant";
 import {
   MetricCard,
   MiniStat,
@@ -51,9 +61,9 @@ type OwnerTab =
 
 const OWNER_TABS: Array<{ id: OwnerTab; label: string; description: string }> = [
   { id: "overview", label: "Overview", description: "Risk, KPIs, revenue, health" },
-  { id: "brain", label: "Operational Brain", description: "Reasoning and live pulse" },
+  { id: "brain", label: "Operational Brain", description: "Risk reasoning and system status" },
   { id: "timeline", label: "Timeline", description: "Audit-backed event stream" },
-  { id: "autopilot", label: "Autopilot", description: "Actions and approvals" },
+  { id: "autopilot", label: "Actions", description: "Automatic actions and approvals" },
   { id: "organization", label: "Organization", description: "Branches, customers, recovery" },
   { id: "settings", label: "Settings", description: "Owner rules and modes" },
 ];
@@ -101,6 +111,11 @@ type RestaurantOrder = {
   lastReminderSentAt?: string | null;
   autoReleaseEligible?: boolean;
   recoverySourceOrderId?: string;
+  recoveryState?: RecoveryState | null;
+  recoveryStartedAt?: string | null;
+  recoveryUpdatedAt?: string | null;
+  recoveryExpiresAt?: string | null;
+  recoveryAttemptCount?: number | null;
 };
 
 type AuditItem = {
@@ -129,6 +144,12 @@ type AuditItem = {
     operationalSimulation?: OperationalSimulation;
     operationalKnowledgeGraph?: OperationalKnowledgeGraph;
     infrastructureHealth?: InfrastructureHealth;
+    operationalEvent?: string;
+    inboundIntent?: string;
+    operationalLabel?: string;
+    actionTaken?: string;
+    requiresHumanReview?: boolean;
+    matchedContext?: string;
   };
   createdAt?: string;
 };
@@ -331,6 +352,14 @@ export default function RestaurantOwnerPage() {
   const [loading, setLoading] = useState(true);
   const [savingSettings, setSavingSettings] = useState(false);
   const [activeTab, setActiveTab] = useState<OwnerTab>("overview");
+  const [staffInvite, setStaffInvite] = useState({
+    name: "",
+    email: "",
+    role: "staff" as "owner" | "manager" | "staff",
+    locationId: "loc-primary",
+  });
+  const [invitingStaff, setInvitingStaff] = useState(false);
+  const [staffInviteMessage, setStaffInviteMessage] = useState("");
 
   const { evaluateOrders, syncRulesFromSettings } = useAutopilotStore();
 
@@ -457,6 +486,36 @@ export default function RestaurantOwnerPage() {
       setSettings(previous);
     } finally {
       setSavingSettings(false);
+    }
+  }
+
+  async function inviteStaff(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setInvitingStaff(true);
+    setStaffInviteMessage("");
+
+    try {
+      const res = await fetch("/api/staff/invite", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(staffInvite),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setStaffInviteMessage(data.error ?? "Staff invite failed.");
+        return;
+      }
+
+      setStaffInvite({ name: "", email: "", role: "staff", locationId: "loc-primary" });
+      setStaffInviteMessage(`Invite created for ${data.staff.email}.`);
+    } catch (error) {
+      console.error(error);
+      setStaffInviteMessage("Staff invite failed.");
+    } finally {
+      setInvitingStaff(false);
     }
   }
 
@@ -737,6 +796,119 @@ export default function RestaurantOwnerPage() {
     return items;
   }, [dailyRiskReport, fraudAlerts.length, messageUsage.percentage]);
 
+  const ownerActionQueue = useMemo(() => {
+    const delayedPayments = orders.filter(
+      (order) =>
+        order.status === "PAYMENT_SENT" ||
+        order.paymentState === "PENDING" ||
+        order.paymentState === "UNPAID"
+    ).length;
+    const blockedReleases = orders.filter(isBlocked).length;
+    const managerReviewQueue = orders.filter(
+      (order) =>
+        isBlocked(order) ||
+        order.terminalMismatch ||
+        order.riskLevel === "HIGH" ||
+        order.paymentState === "FAILED" ||
+        order.paymentState === "BLOCKED"
+    ).length;
+    const failedSends = audit.filter((item) => {
+      const text = item.action.toLowerCase();
+      return text.includes("failed") || text.includes("timeout") || text.includes("message delayed");
+    }).length;
+    const delayedJobs = audit.filter((item) => {
+      const text = item.action.toLowerCase();
+      return text.includes("retry") || text.includes("dead-letter") || text.includes("stale job");
+    }).length;
+
+    return [
+      {
+        label: "Delayed Payments",
+        value: delayedPayments,
+        detail: delayedPayments > 0 ? "Follow up before service time." : "No delayed payments.",
+        tone: delayedPayments > 0 ? "border-amber-200 bg-amber-50 text-amber-800" : "border-emerald-200 bg-emerald-50 text-emerald-800",
+      },
+      {
+        label: "Blocked Releases",
+        value: blockedReleases,
+        detail: blockedReleases > 0 ? "Do not release until cleared." : "No blocked releases.",
+        tone: blockedReleases > 0 ? "border-red-200 bg-red-50 text-red-800" : "border-emerald-200 bg-emerald-50 text-emerald-800",
+      },
+      {
+        label: "Manager Review",
+        value: managerReviewQueue,
+        detail: managerReviewQueue > 0 ? "Owner or manager should decide." : "No manager queue.",
+        tone: managerReviewQueue > 0 ? "border-red-200 bg-red-50 text-red-800" : "border-emerald-200 bg-emerald-50 text-emerald-800",
+      },
+      {
+        label: "Message Problems",
+        value: failedSends,
+        detail: failedSends > 0 ? "Some customer messages need checking." : "Messages look normal.",
+        tone: failedSends > 0 ? "border-amber-200 bg-amber-50 text-amber-800" : "border-emerald-200 bg-emerald-50 text-emerald-800",
+      },
+      {
+        label: "Delayed Work",
+        value: delayedJobs,
+        detail: delayedJobs > 0 ? "Background work may be late." : "No delayed work found.",
+        tone: delayedJobs > 0 ? "border-amber-200 bg-amber-50 text-amber-800" : "border-emerald-200 bg-emerald-50 text-emerald-800",
+      },
+    ];
+  }, [audit, isBlocked, orders]);
+
+  const waitlistRecoverySummary = useMemo(() => {
+    const recoveryOrders = orders.filter((order) => Boolean(order.recoveryState));
+    const active = recoveryOrders.filter((order) =>
+      order.recoveryState === "OPEN_RECOVERY" ||
+      order.recoveryState === "OFFER_SENT" ||
+      order.recoveryState === "WAITING_RESPONSE"
+    );
+    const recovered = recoveryOrders.filter((order) => order.recoveryState === "RECOVERED");
+    const failed = recoveryOrders.filter((order) =>
+      order.recoveryState === "FAILED_RECOVERY" || order.recoveryState === "EXPIRED"
+    );
+    const successRate = recoveryOrders.length > 0
+      ? Math.round((recovered.length / recoveryOrders.length) * 100)
+      : 0;
+    const refillDurations = recovered
+      .map((order) => {
+        if (!order.recoveryStartedAt || !order.recoveryUpdatedAt) return null;
+        const started = new Date(order.recoveryStartedAt).getTime();
+        const ended = new Date(order.recoveryUpdatedAt).getTime();
+        if (Number.isNaN(started) || Number.isNaN(ended) || ended < started) return null;
+        return Math.round((ended - started) / 60_000);
+      })
+      .filter((value): value is number => value !== null);
+    const averageRefillTime = refillDurations.length > 0
+      ? Math.round(refillDurations.reduce((sum, value) => sum + value, 0) / refillDurations.length)
+      : 0;
+    const queuePressure = active.length >= 4 ? "High" : active.length >= 2 ? "Watch" : "Normal";
+
+    return {
+      active,
+      recovered,
+      failed,
+      successRate,
+      averageRefillTime,
+      queuePressure,
+    };
+  }, [orders]);
+
+  const inboundReplySummary = useMemo(() => {
+    const replies = audit.filter((item) => item.meta?.operationalEvent === "INBOUND_OPERATIONAL_MESSAGE");
+    const unresolved = replies.filter((item) => item.meta?.requiresHumanReview || !item.orderId || item.orderId === "COMMUNICATION");
+    const recoveryAcceptances = replies.filter((item) => item.meta?.inboundIntent === "ACCEPT_WAITLIST_SLOT");
+    const lateWarnings = replies.filter((item) => item.meta?.inboundIntent === "RUNNING_LATE");
+    const cancellations = replies.filter((item) => item.meta?.inboundIntent === "CANCEL_REQUEST");
+
+    return {
+      replies,
+      unresolved,
+      recoveryAcceptances,
+      lateWarnings,
+      cancellations,
+    };
+  }, [audit]);
+
   useEffect(() => {
     evaluateOrders(autopilotOrders);
   }, [autopilotOrders, evaluateOrders]);
@@ -853,6 +1025,94 @@ export default function RestaurantOwnerPage() {
           </div>
 
           <div className={activeTab === "overview" ? "space-y-7" : "hidden"}>
+          <OperationalIncidentCenter compact />
+          <OperationalCapacityPanel />
+          <LiveServiceCoordinationPanel />
+          <AutonomousOperationalExecutionPanel />
+          <OperationalCommandCenter />
+          <OperationalRuntimePanel />
+          <OperationalWorkerMeshPanel />
+
+          <section className="rounded-[32px] border border-neutral-200/80 bg-white p-5 shadow-[0_18px_60px_rgba(15,23,42,0.05)] md:p-6">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
+                  What Needs Attention
+                </p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-950">
+                  Owner action queue
+                </h2>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-600">
+                  The few operational areas that may need a person: payments, blocked releases, manager review, customer messages, and delayed background work.
+                </p>
+              </div>
+              <Link
+                href="/restaurant"
+                className="inline-flex min-h-12 items-center justify-center rounded-2xl border border-neutral-300 bg-white px-5 py-3 text-sm font-semibold text-neutral-900"
+              >
+                Open Staff View
+              </Link>
+            </div>
+
+            <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              {ownerActionQueue.map((item) => (
+                <div key={item.label} className={`rounded-2xl border p-4 ${item.tone}`}>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] opacity-75">
+                    {item.label}
+                  </p>
+                  <p className="mt-2 text-3xl font-semibold tracking-tight">{item.value}</p>
+                  <p className="mt-2 text-sm leading-5 opacity-85">{item.detail}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-[32px] border border-neutral-200/80 bg-white p-5 shadow-[0_18px_60px_rgba(15,23,42,0.05)] md:p-6">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-blue-700">
+                  Customer Replies
+                </p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-950">
+                  Inbound reply queue
+                </h2>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-600">
+                  Customer messages routed into simple operational states: arrivals, late warnings, recovery acceptances, cancellation requests, and replies needing staff.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+                <p className="text-blue-600">Unresolved Replies</p>
+                <p className="mt-1 text-2xl font-semibold">{inboundReplySummary.unresolved.length}</p>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <MiniStat title="Inbound Replies" value={String(inboundReplySummary.replies.length)} />
+              <MiniStat title="Need Reply" value={String(inboundReplySummary.unresolved.length)} />
+              <MiniStat title="Wants Slot" value={String(inboundReplySummary.recoveryAcceptances.length)} />
+              <MiniStat title="Running Late" value={String(inboundReplySummary.lateWarnings.length)} />
+              <MiniStat title="Cancel Requests" value={String(inboundReplySummary.cancellations.length)} />
+            </div>
+
+            {inboundReplySummary.unresolved.length > 0 ? (
+              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {inboundReplySummary.unresolved.slice(0, 6).map((item) => (
+                  <div key={item.id} className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-semibold">{item.meta?.operationalLabel ?? "Customer Needs Reply"}</p>
+                      <span className="rounded-full border border-amber-200 bg-white px-2.5 py-1 text-xs font-semibold">
+                        {item.orderId || "Unmatched"}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-amber-800">
+                      {item.meta?.actionTaken ?? "Staff should review this reply."}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </section>
+
           <section
             className={`rounded-[30px] border p-5 shadow-[0_14px_40px_rgba(15,23,42,0.04)] md:p-6 ${
               riskOrders.length > 0
@@ -867,7 +1127,7 @@ export default function RestaurantOwnerPage() {
                 </div>
                 <div>
                   <p className="text-[11px] font-semibold uppercase tracking-[0.16em] opacity-75">
-                    Live Risk Alert
+                    What Needs Attention Now
                   </p>
                   <h2 className="mt-1 text-xl font-semibold tracking-tight md:text-2xl">
                     {riskOrders.length > 0
@@ -875,7 +1135,7 @@ export default function RestaurantOwnerPage() {
                       : "No immediate risk detected"}
                   </h2>
                   <p className="mt-2 max-w-3xl text-sm leading-6 opacity-80">
-                    Valsentra watches unpaid, time-sensitive, medium/high-risk orders so the owner can intervene only when needed.
+                    Valsentra watches unpaid, time-sensitive, medium/high-risk orders so the owner can focus on the few decisions that matter now.
                   </p>
                 </div>
               </div>
@@ -992,9 +1252,55 @@ export default function RestaurantOwnerPage() {
           <section className="rounded-[32px] border border-neutral-200/80 bg-white p-6 shadow-[0_18px_60px_rgba(15,23,42,0.05)] md:p-8">
             <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
               <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-700">
+                  Waitlist Recovery
+                </p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-950">
+                  Slot recovery state
+                </h2>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-600">
+                  Owner-readable view of lost slots being refilled, successful replacements, and recovery pressure.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm">
+                <p className="text-neutral-500">Queue Pressure</p>
+                <p className="mt-1 text-xl font-semibold text-neutral-950">{waitlistRecoverySummary.queuePressure}</p>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+              <MiniStat title="Recovering Now" value={String(waitlistRecoverySummary.active.length)} />
+              <MiniStat title="Recovery Success" value={`${waitlistRecoverySummary.successRate}%`} />
+              <MiniStat title="Avg Refill Time" value={waitlistRecoverySummary.averageRefillTime > 0 ? `${waitlistRecoverySummary.averageRefillTime}m` : "-"} />
+              <MiniStat title="Failed Recovery" value={String(waitlistRecoverySummary.failed.length)} />
+              <MiniStat title="Active Cascades" value={String(waitlistRecoverySummary.active.filter((order) => order.recoveryState === "WAITING_RESPONSE").length)} />
+            </div>
+
+            {waitlistRecoverySummary.active.length > 0 ? (
+              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {waitlistRecoverySummary.active.slice(0, 6).map((order) => (
+                  <div key={order.id} className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-semibold">{order.customerName}</p>
+                      <span className="rounded-full border border-emerald-200 bg-white px-2.5 py-1 text-xs font-semibold">
+                        {order.recoveryState === "WAITING_RESPONSE" ? "Waiting For Customer" : "Recovering Slot"}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-emerald-800">
+                      {order.id} / {formatCurrency(order.amount)} recoverable
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="rounded-[32px] border border-neutral-200/80 bg-white p-6 shadow-[0_18px_60px_rgba(15,23,42,0.05)] md:p-8">
+            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+              <div>
                 <p className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
                   <Brain className="h-3.5 w-3.5 text-neutral-700" />
-                  Autonomous Operator
+                  System Actions
                 </p>
                 <h2 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-950">
                   What Valsentra already handled
@@ -1103,12 +1409,52 @@ export default function RestaurantOwnerPage() {
           </div>
 
           <div className={activeTab === "brain" ? "space-y-7" : "hidden"}>
+            <section className="rounded-[28px] border border-neutral-200/80 bg-white p-5 shadow-sm md:p-6">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
+                Owner Focus
+              </p>
+              <h2 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-950">
+                Start with risk, then check system health
+              </h2>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-600">
+                The most important reasoning appears first. Infrastructure and deeper analysis are grouped below so the page does not read like one long stack of equal alerts.
+              </p>
+            </section>
+
             <OperationalBrainPanel />
-            <OperationalTimeline />
-            <InfrastructureHealthPanel health={latestInfrastructureHealth} emptyState />
-            <OperationalKnowledgeGraphPanel graph={latestOperationalKnowledgeGraph} emptyState />
-            <AgentDecisionPanel decision={latestAgentDecision} emptyState />
-            <OperationalSimulationPanel simulation={latestOperationalSimulation} emptyState />
+
+            <section className="grid gap-6 xl:grid-cols-2">
+              <AgentDecisionPanel decision={latestAgentDecision} emptyState />
+              <OperationalSimulationPanel simulation={latestOperationalSimulation} emptyState />
+            </section>
+
+            <section className="space-y-4">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
+                  System Health
+                </p>
+                <h2 className="mt-1 text-2xl font-semibold tracking-tight text-neutral-950">
+                  Reliability and background work
+                </h2>
+              </div>
+              <InfrastructureHealthPanel health={latestInfrastructureHealth} emptyState />
+              <OperationalWorkerPanel />
+              <PilotReadinessChecklist />
+            </section>
+
+            <section className="space-y-4">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
+                  Deeper Intelligence
+                </p>
+                <h2 className="mt-1 text-2xl font-semibold tracking-tight text-neutral-950">
+                  Patterns and live event context
+                </h2>
+              </div>
+              <OperationalKnowledgeGraphPanel graph={latestOperationalKnowledgeGraph} emptyState />
+              <OperationalTimeline />
+            </section>
+
             {latestAutonomousRecovery ? (
               <section className="rounded-[32px] border border-neutral-200/80 bg-white p-6 shadow-[0_18px_60px_rgba(15,23,42,0.05)] md:p-8">
                 <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -1244,7 +1590,7 @@ export default function RestaurantOwnerPage() {
                 <div className="rounded-[22px] border border-neutral-200 bg-neutral-50 p-4 text-sm">
                   <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                     <div>
-                      <p className="font-medium text-neutral-900">Autopilot Mode</p>
+                      <p className="font-medium text-neutral-900">Automation Mode</p>
                       <p className="mt-1 max-w-xl text-xs leading-5 text-neutral-500">
                         Choose how much control Valsentra has over automatic release, recovery, and background actions.
                       </p>
@@ -1322,6 +1668,67 @@ export default function RestaurantOwnerPage() {
                   {metrics.recoveredOpportunities}
                 </p>
               </div>
+            </div>
+
+            <div className="rounded-[32px] border border-neutral-200/80 bg-white p-6 shadow-[0_18px_60px_rgba(15,23,42,0.05)] md:p-8 xl:col-span-2">
+              <div className="mb-5">
+                <h2 className="text-2xl font-semibold tracking-tight">Staff Access</h2>
+                <p className="mt-2 text-sm text-neutral-600">
+                  Invite staff into this organization with a scoped role and location.
+                </p>
+              </div>
+
+              <form onSubmit={inviteStaff} className="grid gap-3 md:grid-cols-[1fr_1fr_180px_1fr_auto]">
+                <input
+                  value={staffInvite.name}
+                  onChange={(event) =>
+                    setStaffInvite((current) => ({ ...current, name: event.target.value }))
+                  }
+                  placeholder="Name"
+                  className="rounded-2xl border border-neutral-200 px-4 py-3 text-sm outline-none focus:border-neutral-500"
+                />
+                <input
+                  value={staffInvite.email}
+                  onChange={(event) =>
+                    setStaffInvite((current) => ({ ...current, email: event.target.value }))
+                  }
+                  required
+                  type="email"
+                  placeholder="Email"
+                  className="rounded-2xl border border-neutral-200 px-4 py-3 text-sm outline-none focus:border-neutral-500"
+                />
+                <select
+                  value={staffInvite.role}
+                  onChange={(event) =>
+                    setStaffInvite((current) => ({
+                      ...current,
+                      role: event.target.value as "owner" | "manager" | "staff",
+                    }))
+                  }
+                  className="rounded-2xl border border-neutral-200 px-4 py-3 text-sm outline-none focus:border-neutral-500"
+                >
+                  <option value="staff">Staff</option>
+                  <option value="manager">Manager</option>
+                  <option value="owner">Owner</option>
+                </select>
+                <input
+                  value={staffInvite.locationId}
+                  onChange={(event) =>
+                    setStaffInvite((current) => ({ ...current, locationId: event.target.value }))
+                  }
+                  placeholder="Location ID"
+                  className="rounded-2xl border border-neutral-200 px-4 py-3 text-sm outline-none focus:border-neutral-500"
+                />
+                <button
+                  disabled={invitingStaff}
+                  className="rounded-2xl bg-neutral-950 px-5 py-3 text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  {invitingStaff ? "Inviting..." : "Invite"}
+                </button>
+              </form>
+              {staffInviteMessage ? (
+                <p className="mt-3 text-sm text-neutral-600">{staffInviteMessage}</p>
+              ) : null}
             </div>
           </section>
           </div>

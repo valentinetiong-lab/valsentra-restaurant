@@ -6,8 +6,9 @@ import type {
 
 export function createInternalCommunicationProvider(): CommunicationProvider {
   return {
-    name: "internal-mock",
+    name: "internal-record",
     mode: "INTERNAL",
+    channel: "INTERNAL",
     canSend() {
       return true;
     },
@@ -16,7 +17,7 @@ export function createInternalCommunicationProvider(): CommunicationProvider {
       // a customer-facing WhatsApp/SMS/email message.
       return {
         ok: true,
-        provider: "internal-mock",
+        provider: "internal-record",
         mode: "INTERNAL",
         status: "RECORDED",
         messageId: `internal-${Date.now()}`,

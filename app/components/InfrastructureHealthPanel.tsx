@@ -69,7 +69,7 @@ export default function InfrastructureHealthPanel({
             Stability {health.infrastructureStabilityScore}/100
           </h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-600">
-            Queue, provider, webhook, retry, and recovery execution health for organization scope {health.organizationId}.
+            Queue, provider, webhook, retry, and recovery execution health for business scope {health.organizationId}.
           </p>
         </div>
         <span className={`rounded-full border px-3 py-1.5 text-[11px] font-semibold ${healthClasses(health.providerHealth)}`}>
@@ -116,7 +116,7 @@ export default function InfrastructureHealthPanel({
 
       <div className="mt-5 rounded-[24px] border border-neutral-200 bg-neutral-50/80 p-4">
         <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-neutral-500">
-          Tenant-safe diagnostics
+          Business-safe diagnostics
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           {health.tenantSafeDiagnostics.map((item) => (

@@ -10,12 +10,21 @@ import {
 } from "@/app/lib/domain/orderMapper";
 import { parseReservationTime } from "@/app/lib/domain/reservationTimeParser";
 import { normalisePaymentState } from "@/app/lib/engines/paymentEngine";
+import { appendOperationalTimelineEvent } from "@/app/lib/operationalTimelineMemoryEngine";
 import {
   shouldExecuteAutoRelease,
   shouldExecuteWaitlist,
   shouldSilent,
   type AutopilotMode,
 } from "@/app/lib/autopilotMode";
+import {
+  enforceRateLimit,
+  requireRouteRole,
+} from "@/app/lib/security/routeProtection";
+import {
+  actorAuditMeta,
+  attachTenantToPayload,
+} from "@/app/lib/security/tenantSupabase";
 
 function createLearningEntryForOrder(
   order: any,
@@ -63,11 +72,11 @@ function addMinutesToIso(baseIso: string, minutes: number) {
   ).toISOString();
 }
 
-async function getAutopilotMode(): Promise<AutopilotMode> {
+async function getAutopilotMode(organizationId = "org-valsentra"): Promise<AutopilotMode> {
   const { data, error } = await supabaseAdmin
     .from("restaurant_settings")
     .select("autopilot_mode")
-    .eq("id", 1)
+    .eq("organization_id", organizationId)
     .single();
 
   if (error) {
@@ -84,10 +93,18 @@ async function getAutopilotMode(): Promise<AutopilotMode> {
   return "SEMI_AUTO";
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const access = await requireRouteRole({
+    request: req,
+    route: "/api/orders",
+    allowedRoles: ["staff", "manager", "owner", "admin", "internal"],
+  });
+  if (!access.ok) return access.response;
+
   const { data, error } = await supabaseAdmin
     .from("orders")
     .select("*")
+    .eq("organization_id", access.actor.organizationId)
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -100,6 +117,22 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const access = await requireRouteRole({
+    request: req,
+    route: "/api/orders",
+    allowedRoles: ["staff", "manager", "owner", "admin", "internal"],
+  });
+  if (!access.ok) return access.response;
+
+  const rateLimit = await enforceRateLimit({
+    request: req,
+    route: "/api/orders",
+    scope: "orders-post",
+    maxRequests: 60,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.ok) return rateLimit.response;
+
   const body = await req.json();
 
   const createdAt = body.createdAt ?? new Date().toISOString();
@@ -109,17 +142,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: parsedReservationTime.error }, { status: 400 });
   }
 
-  const payload = mapOrderToDb({
-    ...body,
-    createdAt,
-    reservationTime: parsedReservationTime.reservationTime,
-    paymentState: normalisePaymentState(body.paymentState),
-    slotHoldStartedAt: body.slotHoldStartedAt ?? createdAt,
-    slotHoldExpiresAt: body.slotHoldExpiresAt ?? addMinutesToIso(createdAt, 15),
-    autoReleaseEligible: body.autoReleaseEligible ?? true,
-    reliabilityScore: body.reliabilityScore ?? 70,
-    assignedStaff: body.assignedStaff ?? "Staff",
-  });
+  const payload = attachTenantToPayload(
+    mapOrderToDb({
+      ...body,
+      createdAt,
+      reservationTime: parsedReservationTime.reservationTime,
+      paymentState: normalisePaymentState(body.paymentState),
+      slotHoldStartedAt: body.slotHoldStartedAt ?? createdAt,
+      slotHoldExpiresAt: body.slotHoldExpiresAt ?? addMinutesToIso(createdAt, 15),
+      autoReleaseEligible: body.autoReleaseEligible ?? true,
+      reliabilityScore: body.reliabilityScore ?? 70,
+      assignedStaff: body.assignedStaff ?? "Staff",
+    }),
+    access.actor
+  );
 
   const { data, error } = await supabaseAdmin
     .from("orders")
@@ -131,10 +167,50 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json(mapAndEnrichOrderFromDb(data));
+  const mappedOrder = mapAndEnrichOrderFromDb(data);
+  await appendOperationalTimelineEvent({
+    organizationId: access.actor.organizationId,
+    locationId: mappedOrder.locationId ?? access.actor.locationId,
+    orderId: mappedOrder.id,
+    actorSource: "Staff",
+    actorUserId: access.actor.userId,
+    eventType: "BOOKING_CREATED",
+    summary: `Booking created for ${mappedOrder.customerName}.`,
+    severity: "INFO",
+    category: "BOOKING",
+    traceId: access.traceId,
+    correlationId: `booking-created:${mappedOrder.id}`,
+    idempotencyKey: `booking-created:${access.actor.organizationId}:${mappedOrder.id}`,
+    metadata: {
+      customerName: mappedOrder.customerName,
+      reservationTime: mappedOrder.reservationTime,
+      orderType: mappedOrder.orderType,
+      amount: mappedOrder.amount,
+      paymentState: mappedOrder.paymentState,
+      ...actorAuditMeta(access.actor, access.traceId),
+    },
+  });
+
+  return NextResponse.json(mappedOrder);
 }
 
 export async function PATCH(req: Request) {
+  const access = await requireRouteRole({
+    request: req,
+    route: "/api/orders",
+    allowedRoles: ["staff", "manager", "owner", "admin", "internal"],
+  });
+  if (!access.ok) return access.response;
+
+  const rateLimit = await enforceRateLimit({
+    request: req,
+    route: "/api/orders",
+    scope: "orders-patch",
+    maxRequests: 120,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.ok) return rateLimit.response;
+
   const body = await req.json();
   const payload = mapOrderToDb(body);
 
@@ -142,6 +218,7 @@ export async function PATCH(req: Request) {
     .from("orders")
     .update(payload)
     .eq("id", body.id)
+    .eq("organization_id", access.actor.organizationId)
     .select()
     .single();
 
@@ -152,10 +229,29 @@ export async function PATCH(req: Request) {
   return NextResponse.json(mapAndEnrichOrderFromDb(data));
 }
 
-export async function PUT() {
-  const mode = await getAutopilotMode();
+export async function PUT(req: Request) {
+  const access = await requireRouteRole({
+    request: req,
+    route: "/api/orders",
+    allowedRoles: ["internal"],
+  });
+  if (!access.ok) return access.response;
 
-  const { data: ordersRaw, error } = await supabaseAdmin.from("orders").select("*");
+  const rateLimit = await enforceRateLimit({
+    request: req,
+    route: "/api/orders",
+    scope: "orders-put-autopilot",
+    maxRequests: 10,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.ok) return rateLimit.response;
+
+  const mode = await getAutopilotMode(access.actor.organizationId);
+
+  const { data: ordersRaw, error } = await supabaseAdmin
+    .from("orders")
+    .select("*")
+    .eq("organization_id", access.actor.organizationId);
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -197,6 +293,8 @@ export async function PUT() {
             action: `Human review required for ${order.id}. Rule: ${decision.rule}.`,
             staff: "Autopilot",
             order_id: order.id,
+            organization_id: access.actor.organizationId,
+            location_id: order.locationId ?? access.actor.locationId,
             meta: {
               mode,
               rule: decision.rule,
@@ -209,6 +307,7 @@ export async function PUT() {
               learningEntry,
               requiresHumanAction: true,
               humanActionReason: decision.reason,
+              ...actorAuditMeta(access.actor, access.traceId),
             },
           });
         }
@@ -232,6 +331,8 @@ export async function PUT() {
           action: `Auto release suggested for ${order.id}. Rule: ${decision.rule}. Confidence: ${decision.confidence}%.`,
           staff: "Autopilot",
           order_id: order.id,
+          organization_id: access.actor.organizationId,
+          location_id: order.locationId ?? access.actor.locationId,
           meta: {
             mode,
             rule: decision.rule,
@@ -242,11 +343,12 @@ export async function PUT() {
             orderAmount: order.amount ?? 0,
             ...buildIntelligenceMeta(order),
             learningEntry,
-            requiresHumanAction: true,
-            humanActionReason:
-              "Autopilot is in manual mode, so this action requires approval.",
-          },
-        });
+              requiresHumanAction: true,
+              humanActionReason:
+                "Autopilot is in manual mode, so this action requires approval.",
+              ...actorAuditMeta(access.actor, access.traceId),
+            },
+          });
       }
 
       continue;
@@ -262,7 +364,8 @@ export async function PUT() {
           notes: `${order.notes || ""} | ${decision.reason}`,
         })
       )
-      .eq("id", order.id);
+      .eq("id", order.id)
+      .eq("organization_id", access.actor.organizationId);
 
     if (updateError) {
       logs.push(`${order.id}: release failed (${updateError.message})`);
@@ -283,6 +386,8 @@ export async function PUT() {
         action: `Auto release: ${order.id}. Rule: ${decision.rule}. Confidence: ${decision.confidence}%.`,
         staff: "Autopilot",
         order_id: order.id,
+        organization_id: access.actor.organizationId,
+        location_id: order.locationId ?? access.actor.locationId,
         meta: {
           mode,
           rule: decision.rule,
@@ -294,6 +399,7 @@ export async function PUT() {
           ...buildIntelligenceMeta(order),
           learningEntry: releaseLearningEntry,
           requiresHumanAction: decision.requiresHumanAction,
+          ...actorAuditMeta(access.actor, access.traceId),
         },
       });
     }
@@ -302,6 +408,12 @@ export async function PUT() {
       const cascade = await runWaitlistCascade({
         orderId: order.id,
         staffName: "Autopilot",
+        organizationId: access.actor.organizationId,
+        actorUserId:
+          access.actor.userId !== "development-user" &&
+          access.actor.userId !== "internal-system"
+            ? access.actor.userId
+            : undefined,
       });
 
       const recoveryLearningEntry = createLearningEntryForOrder(
@@ -329,12 +441,15 @@ export async function PUT() {
               : `Waitlist recovery failed for ${order.id}.`,
           staff: "Autopilot",
           order_id: order.id,
+          organization_id: access.actor.organizationId,
+          location_id: order.locationId ?? access.actor.locationId,
           meta: {
             mode,
             orderAmount: order.amount ?? 0,
             ...buildIntelligenceMeta(order),
             cascade,
             learningEntry: recoveryLearningEntry,
+            ...actorAuditMeta(access.actor, access.traceId),
           },
         });
       }
@@ -353,11 +468,14 @@ export async function PUT() {
           action: `Waitlist recovery skipped for ${order.id} because autopilot mode is ${mode}.`,
           staff: "Autopilot",
           order_id: order.id,
+          organization_id: access.actor.organizationId,
+          location_id: order.locationId ?? access.actor.locationId,
           meta: {
             mode,
             orderAmount: order.amount ?? 0,
             ...buildIntelligenceMeta(order),
             learningEntry: waitlistSkippedLearningEntry,
+            ...actorAuditMeta(access.actor, access.traceId),
           },
         });
       }

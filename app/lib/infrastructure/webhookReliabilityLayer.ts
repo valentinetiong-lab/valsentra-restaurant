@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { buildIdempotencyKey, checkIdempotencyKey } from "@/app/lib/infrastructure/idempotencyLayer";
+import { validateWhatsAppBusinessWebhookSignature } from "@/app/lib/providers/communication/whatsappBusinessIntegration";
 
 export type WebhookReliabilityResult = {
   accepted: boolean;
@@ -60,12 +61,16 @@ export async function evaluateWebhookReliability({
   messageId,
   orderId,
   rawBody,
+  requestUrl,
+  params,
 }: {
   headers: Headers;
   provider: string;
   messageId: string;
   orderId?: string | null;
   rawBody: string;
+  requestUrl?: string;
+  params?: Record<string, unknown>;
 }): Promise<WebhookReliabilityResult> {
   const malformed = !messageId || messageId === "unknown";
   const retryAttempt = parseRetryAttempt(headers);
@@ -77,11 +82,19 @@ export async function evaluateWebhookReliability({
   });
   const replay = await checkIdempotencyKey({ key: idempotencyKey, scope: "WEBHOOK" });
   const signature = headers.get("x-twilio-signature") ?? headers.get("x-provider-signature");
-  const signatureResult = validateWebhookSignature({
-    rawBody,
-    signature,
-    secret: process.env.WHATSAPP_WEBHOOK_SIGNING_SECRET ?? null,
-  });
+  const signatureResult =
+    provider === "whatsapp"
+      ? validateWhatsAppBusinessWebhookSignature({
+          requestUrl: requestUrl ?? "",
+          rawBody,
+          params: params ?? {},
+          signature,
+        })
+      : validateWebhookSignature({
+          rawBody,
+          signature,
+          secret: process.env.WHATSAPP_WEBHOOK_SIGNING_SECRET ?? null,
+        });
 
   return {
     accepted: !malformed && !replay.duplicate && signatureResult.validated,

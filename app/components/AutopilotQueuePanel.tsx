@@ -634,13 +634,13 @@ export default function AutopilotQueuePanel() {
       <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-neutral-500">
-            AI Operations Rail
+            Action Queue
           </p>
           <h2 className="mt-1 text-2xl font-semibold tracking-tight text-neutral-950">
             Approval Queue
           </h2>
           <p className="mt-1 max-w-2xl text-sm text-neutral-500">
-            Review Valsentra recommendations before they execute. This is the human override layer for autonomous revenue protection.
+            Review Valsentra recommendations before they run. Owner approval stays in control.
           </p>
         </div>
 
@@ -699,7 +699,7 @@ export default function AutopilotQueuePanel() {
       {learningSignals.length > 0 ? (
         <div className="mb-5 rounded-2xl border border-purple-200 bg-purple-50 p-4">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-purple-700">
-            Continuous Learning Feed
+            Learning Signals
           </p>
           <p className="mt-1 text-sm text-purple-900">
             Signals Valsentra is using to improve future revenue protection decisions.
@@ -784,12 +784,12 @@ export default function AutopilotQueuePanel() {
                     </span>
                     {typeof item.collapseProbability === "number" ? (
                       <span className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-700">
-                        Collapse {item.collapseProbability}%
+                        Risk {item.collapseProbability}%
                       </span>
                     ) : null}
                     {item.ghostPingUrgency ? (
                       <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-                        Ghost Ping {item.ghostPingUrgency}
+                        Message urgency {item.ghostPingUrgency}
                       </span>
                     ) : null}
                   </div>
@@ -810,7 +810,7 @@ export default function AutopilotQueuePanel() {
 
                     {item.ghostPingReasoning ? (
                       <div className="mt-2 rounded-xl border border-blue-100 bg-white/80 px-3 py-2 text-xs text-blue-800">
-                        <span className="font-semibold">Ghost Ping reasoning:</span>{" "}
+                        <span className="font-semibold">Message reason:</span>{" "}
                         {item.ghostPingReasoning}
                       </div>
                     ) : null}
@@ -836,7 +836,7 @@ export default function AutopilotQueuePanel() {
                       ) : null}
 
                       {item.aiConfidence ? (
-                        <span>AI confidence {item.aiConfidence}%</span>
+                        <span>Confidence {item.aiConfidence}%</span>
                       ) : null}
 
                       {item.estimatedRevenueProtected ? (

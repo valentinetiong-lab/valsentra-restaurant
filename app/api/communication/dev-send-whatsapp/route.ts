@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { executeDirectCommunication } from "@/app/lib/providers/communication/communicationExecutionService";
 import { getWhatsAppProviderStatus } from "@/app/lib/providers/communication/whatsappProvider";
+import { requireDevelopmentOnly } from "@/app/lib/security/environment";
+import { blockWithSecurityAudit } from "@/app/lib/security/routeProtection";
 import type { CommunicationSendInput } from "@/app/lib/providers/communication/communicationProviderTypes";
 
 export const dynamic = "force-dynamic";
@@ -74,14 +76,14 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 }
 
 export async function POST(request: Request) {
-  if (process.env.NODE_ENV === "production") {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "Development WhatsApp send endpoint is disabled in production.",
-      },
-      { status: 403 }
-    );
+  const guard = requireDevelopmentOnly("Development WhatsApp send endpoint");
+  if (!guard.ok) {
+    return blockWithSecurityAudit({
+      guard,
+      request,
+      route: "/api/communication/dev-send-whatsapp",
+      action: "production_guard_violation",
+    });
   }
 
   if (request.headers.get(REQUIRED_HEADER) !== "true") {

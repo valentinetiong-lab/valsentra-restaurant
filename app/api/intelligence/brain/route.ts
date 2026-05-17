@@ -1,8 +1,16 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/app/lib/admin";
 import { buildOperationalBrainInsights } from "@/app/lib/intelligence/operationalBrainEngine";
+import { requireRouteRole } from "@/app/lib/security/routeProtection";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const access = await requireRouteRole({
+    request,
+    route: "/api/intelligence/brain",
+    allowedRoles: ["owner", "manager", "admin", "internal"],
+  });
+  if (!access.ok) return access.response;
+
   try {
     const [
       { data: ordersRaw, error: ordersError },
@@ -10,13 +18,22 @@ export async function GET() {
       { data: waitlistRaw, error: waitlistError },
     ] =
       await Promise.all([
-        supabaseAdmin.from("orders").select("*").order("created_at", { ascending: false }),
+        supabaseAdmin
+          .from("orders")
+          .select("*")
+          .eq("organization_id", access.actor.organizationId)
+          .order("created_at", { ascending: false }),
         supabaseAdmin
           .from("audit_logs")
           .select("*")
+          .eq("meta->>organizationId", access.actor.organizationId)
           .order("created_at", { ascending: false })
           .limit(200),
-        supabaseAdmin.from("waitlist_leads").select("id").limit(200),
+        supabaseAdmin
+          .from("waitlist_leads")
+          .select("id")
+          .eq("organization_id", access.actor.organizationId)
+          .limit(200),
       ]);
 
     if (ordersError) {
